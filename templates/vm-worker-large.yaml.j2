@@ -60,10 +60,6 @@ spec:
             - name: rootdisk
               disk:
                 bus: virtio
-              # bootOrder: 1
-            - name: cdrom-iso
-              cdrom:
-                bus: sata
               bootOrder: 1
 
           interfaces:
@@ -87,6 +83,3 @@ spec:
         - name: rootdisk
           dataVolume:
             name: {{ vm_name }}-rootdisk
-        - name: cdrom-iso
-          persistentVolumeClaim:
-            claimName: {{ iso_pvc_name }}

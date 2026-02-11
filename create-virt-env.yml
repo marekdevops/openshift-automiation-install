@@ -289,8 +289,17 @@
           MAC adresy zostały zapisane do: {{ cluster_config_file }}
 
           Następne kroki:
-          1. Sprawdź/uzupełnij IP adresy w pliku {{ cluster_config_file }}
-          2. Uruchom: ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
+          1. Sprawdź/uzupełnij IP adresy i hostname w pliku:
+             {{ cluster_config_file }}
+
+          2. Wygeneruj ISO:
+             ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
+
+          3. Podepnij ISO i zrestartuj VM:
+             ansible-playbook attach-iso.yml -e @clusters/{{ cluster_name }}.yml
+
+          4. Monitoruj instalację:
+             ansible-playbook wait-ocp-install.yml -e @clusters/{{ cluster_name }}.yml
 
     - name: "=== TABELA NODÓW ==="
       ansible.builtin.debug:

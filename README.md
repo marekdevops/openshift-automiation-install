@@ -41,13 +41,15 @@ ansible-playbook create-virt-env.yml -e @clusters/mycluster.yml
 ```
 
 This will:
-- Create VMs in OpenShift Virtualization
-- Wait for VMs to start
+- Create VMs in OpenShift Virtualization (without CDROM)
+- Start VMs and wait for them to run
 - **Automatically save MAC addresses** to the config file
 
 ### 3. Verify Configuration
 
-Check `clusters/mycluster.yml` — MAC addresses are now populated. Verify IP addresses are correct.
+Check `clusters/mycluster.yml` — MAC addresses are now populated. Verify:
+- IP addresses are correct
+- Hostnames are correct
 
 ### 4. Generate Agent ISO
 
@@ -57,18 +59,18 @@ ansible-playbook generate-ocp-agent-iso.yml -e @clusters/mycluster.yml
 
 Output: `/tmp/ocp-install/<cluster>/agent.x86_64.iso`
 
-### 5. Boot VMs from ISO
-
-Upload ISO and attach to VMs:
+### 5. Attach ISO and Restart VMs
 
 ```bash
-virtctl image-upload pvc agent-iso-pvc \
-  --size=2Gi \
-  --image-path=/tmp/ocp-install/mycluster/agent.x86_64.iso \
-  -n <namespace>
+ansible-playbook attach-iso.yml -e @clusters/mycluster.yml
 ```
 
-Restart VMs to boot from ISO.
+This will:
+- Upload ISO to PVC
+- Stop VMs
+- Attach CDROM with ISO
+- Set boot order (CDROM first)
+- Start VMs
 
 ### 6. Monitor Installation
 
@@ -80,9 +82,10 @@ ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml
 
 | Playbook | Description |
 |----------|-------------|
-| `create-virt-env.yml` | Creates VMs, saves MAC addresses to config |
+| `create-virt-env.yml` | Creates VMs (no CDROM), starts, saves MAC addresses |
 | `delete-virt-env.yml` | Deletes VMs (dry-run by default, use `-e remove=yes`) |
 | `generate-ocp-agent-iso.yml` | Generates Agent-Based Installer ISO |
+| `attach-iso.yml` | Uploads ISO, attaches CDROM, restarts VMs |
 | `wait-ocp-install.yml` | Monitors installation progress |
 
 ## Configuration
