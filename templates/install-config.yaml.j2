@@ -57,5 +57,5 @@ platform:
 fips: true
 {% endif %}
 
-pullSecret: '{{ pull_secret_content | trim }}'
-sshKey: '{{ ssh_public_key_content | trim }}'
+pullSecret: '{{ lookup("file", pull_secret_file) | trim }}'
+sshKey: '{{ lookup("file", ssh_public_key_file) | trim }}'

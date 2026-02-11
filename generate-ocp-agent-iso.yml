@@ -69,21 +69,6 @@
         msg: "Nie znaleziono klucza SSH w {{ ssh_public_key_file }}"
       when: not ssh_file.stat.exists
 
-    - name: Wczytaj pull-secret
-      ansible.builtin.slurp:
-        src: "{{ pull_secret_file }}"
-      register: pull_secret_raw
-
-    - name: Wczytaj klucz SSH
-      ansible.builtin.slurp:
-        src: "{{ ssh_public_key_file }}"
-      register: ssh_key_raw
-
-    - name: Ustaw zmienne z plikami
-      ansible.builtin.set_fact:
-        pull_secret_content: "{{ pull_secret_raw.content | b64decode | trim }}"
-        ssh_public_key_content: "{{ ssh_key_raw.content | b64decode | trim }}"
-
     # =========================================================================
     # Krok 2: Podsumowanie konfiguracji
     # =========================================================================
