@@ -57,5 +57,5 @@ platform:
 fips: true
 {% endif %}
 
-pullSecret: {{ pull_secret_content | to_json }}
-sshKey: {{ ssh_public_key_content | to_json }}
+pullSecret: '{{ pull_secret_content | trim }}'
+sshKey: '{{ ssh_public_key_content | trim }}'

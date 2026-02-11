@@ -81,7 +81,7 @@
 
     - name: Ustaw zmienne z plikami
       ansible.builtin.set_fact:
-        pull_secret_content: "{{ pull_secret_raw.content | b64decode | trim | replace('\n', '') }}"
+        pull_secret_content: "{{ pull_secret_raw.content | b64decode | trim }}"
         ssh_public_key_content: "{{ ssh_key_raw.content | b64decode | trim }}"
 
     # =========================================================================
