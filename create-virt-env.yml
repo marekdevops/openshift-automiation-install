@@ -196,16 +196,9 @@
       ansible.builtin.set_fact:
         config_data: "{{ config_file_content.content | b64decode | from_yaml }}"
 
-    - name: Zaktualizuj MAC adresy w konfiguracji
+    - name: Inicjalizuj vm_mac_map jeśli pusty
       ansible.builtin.set_fact:
-        updated_nodes: >-
-          {{
-            config_data.nodes | map('combine', {
-              'mac': vm_mac_map[item.name] | default(item.mac)
-            }) | list
-          }}
-      vars:
-        item: "{{ config_data.nodes }}"
+        vm_mac_map: "{{ vm_mac_map | default({}) }}"
 
     - name: Przygotuj zaktualizowaną konfigurację
       ansible.builtin.set_fact:
@@ -213,7 +206,7 @@
 
     - name: Buduj listę nodów z MAC
       ansible.builtin.set_fact:
-        updated_nodes_list: "{{ updated_nodes_list + [item | combine({'mac': vm_mac_map[item.name] | default(item.mac)})] }}"
+        updated_nodes_list: "{{ updated_nodes_list + [item | combine({'mac': vm_mac_map[item.name] | default(item.mac) | default('')})] }}"
       loop: "{{ config_data.nodes }}"
       loop_control:
         label: "{{ item.name }}"
