@@ -47,13 +47,24 @@ cluster_network_prefix: 23
 service_network_cidr: 172.30.0.0/16
 
 # -----------------------------------------------------------------------------
-# Konfiguracja hostów
+# Load Balancer / VIP
 # -----------------------------------------------------------------------------
-# Adresy IP dla usług klastra (muszą być z machine_network)
-api_vip: 192.168.214.100
-ingress_vip: 192.168.214.101
+# use_vip: true  — klaster zarządza VIP przez keepalived (wymaga wolnych IP)
+# use_vip: false — zewnętrzny load balancer (F5, HAProxy) + DNS
+use_vip: false
 
-# Serwer DNS i gateway
+# VIP adresy (tylko jeśli use_vip: true)
+# api_vip: 192.168.214.100
+# ingress_vip: 192.168.214.101
+
+# -----------------------------------------------------------------------------
+# DNS i Gateway
+# -----------------------------------------------------------------------------
+# Wymagane rekordy DNS (dla use_vip: false):
+#   api.ocp1.example.com     → IP load balancera (lub round-robin na mastery)
+#   api-int.ocp1.example.com → IP load balancera (lub round-robin na mastery)
+#   *.apps.ocp1.example.com  → IP load balancera (lub round-robin na workery/mastery)
+
 dns_server: 192.168.214.1
 gateway: 192.168.214.1
 

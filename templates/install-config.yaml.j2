@@ -33,7 +33,15 @@ networking:
     - cidr: {{ machine_network }}
 
 platform:
+{% if use_vip | default(false) | bool %}
+  baremetal:
+    apiVIPs:
+      - {{ api_vip }}
+    ingressVIPs:
+      - {{ ingress_vip }}
+{% else %}
   {{ platform_type }}: {}
+{% endif %}
 
 {% if fips_enabled | default(false) | bool %}
 fips: true
