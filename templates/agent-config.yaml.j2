@@ -37,7 +37,9 @@ hosts:
       dns-resolver:
         config:
           server:
-            - {{ dns_server }}
+{% for dns in dns_servers %}
+            - {{ dns }}
+{% endfor %}
       routes:
         config:
           - destination: 0.0.0.0/0

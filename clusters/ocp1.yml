@@ -45,8 +45,11 @@ vm_defaults:
 # Sieć
 # -----------------------------------------------------------------------------
 machine_network: 192.168.214.0/24
-dns_server: 192.168.214.1
 gateway: 192.168.214.1
+
+# DNS servers (lista)
+dns_servers:
+  - 192.168.214.1
 
 # NTP servers (lista)
 ntp_servers:
