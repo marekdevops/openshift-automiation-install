@@ -90,7 +90,7 @@
           Load Balancer: {{ 'Zewnętrzny (F5/HAProxy)' if external_lb | default(true) | bool else 'Wewnętrzny (keepalived)' }}
           API VIP: {{ api_vip }}
           Ingress VIP: {{ ingress_vip }}
-          DNS: {{ dns_server }}
+          DNS: {{ dns_servers | join(', ') }}
           Gateway: {{ gateway }}
 
     # =========================================================================

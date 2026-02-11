@@ -245,8 +245,17 @@
           # Sieć
           # -----------------------------------------------------------------------------
           machine_network: {{ machine_network }}
-          dns_server: {{ dns_server }}
           gateway: {{ gateway }}
+
+          dns_servers:
+          {% for dns in dns_servers %}
+            - {{ dns }}
+          {% endfor %}
+
+          ntp_servers:
+          {% for ntp in ntp_servers %}
+            - {{ ntp }}
+          {% endfor %}
 
           api_vip: {{ api_vip }}
           ingress_vip: {{ ingress_vip }}
