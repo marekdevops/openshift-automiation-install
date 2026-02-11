@@ -32,16 +32,25 @@ networking:
   machineNetwork:
     - cidr: {{ machine_network }}
 
-{% if use_vip | default(false) | bool %}
+{% if single_node | default(false) | bool %}
+platform:
+  none: {}
+{% elif external_lb | default(true) | bool %}
 platform:
   baremetal:
     apiVIPs:
       - {{ api_vip }}
     ingressVIPs:
       - {{ ingress_vip }}
+    loadBalancer:
+      type: UserManaged
 {% else %}
 platform:
-  none: {}
+  baremetal:
+    apiVIPs:
+      - {{ api_vip }}
+    ingressVIPs:
+      - {{ ingress_vip }}
 {% endif %}
 
 {% if fips_enabled | default(false) | bool %}

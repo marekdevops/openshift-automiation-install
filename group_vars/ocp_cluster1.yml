@@ -49,13 +49,21 @@ service_network_cidr: 172.30.0.0/16
 # -----------------------------------------------------------------------------
 # Load Balancer / VIP
 # -----------------------------------------------------------------------------
-# use_vip: true  — klaster zarządza VIP przez keepalived (wymaga wolnych IP)
-# use_vip: false — zewnętrzny load balancer (F5, HAProxy) + DNS
-use_vip: false
+# external_lb: true  — zewnętrzny LB (F5, HAProxy) zarządza VIPami
+# external_lb: false — klaster zarządza VIP przez keepalived
+#
+# W obu przypadkach musisz podać api_vip i ingress_vip.
+# Różnica: z external_lb: true klaster nie uruchamia keepalived,
+# oczekuje że LB zewnętrzny obsługuje te adresy.
+external_lb: true
 
-# VIP adresy (tylko jeśli use_vip: true)
-# api_vip: 192.168.214.100
-# ingress_vip: 192.168.214.101
+# VIP adresy — IP które F5/HAProxy wystawia dla API i Apps
+# Te same IP muszą być w DNS:
+#   api.ocp1.example.com     → api_vip
+#   api-int.ocp1.example.com → api_vip
+#   *.apps.ocp1.example.com  → ingress_vip
+api_vip: 192.168.214.100
+ingress_vip: 192.168.214.101
 
 # -----------------------------------------------------------------------------
 # DNS i Gateway
@@ -117,12 +125,6 @@ nodes:
 # -----------------------------------------------------------------------------
 # Opcje instalacji
 # -----------------------------------------------------------------------------
-# Typ platformy (none = bare metal / VM bez integracji z chmurą)
-platform_type: none
-
-# Wersja OpenShift (musi odpowiadać wersji openshift-install binary)
-# openshift_version: 4.20
-
 # SNO (Single Node OpenShift) — ustaw na true dla klastra 1-nodowego
 single_node: false
 

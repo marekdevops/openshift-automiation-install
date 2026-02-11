@@ -95,11 +95,9 @@
       ansible.builtin.debug:
         msg: |
           Machine network: {{ machine_network }}
-          Load Balancer: {{ 'Zewnętrzny (F5/HAProxy)' if not use_vip | default(false) | bool else 'Wewnętrzny (keepalived)' }}
-          {% if use_vip | default(false) | bool %}
+          Load Balancer: {{ 'Zewnętrzny (F5/HAProxy)' if external_lb | default(true) | bool else 'Wewnętrzny (keepalived)' }}
           API VIP: {{ api_vip }}
           Ingress VIP: {{ ingress_vip }}
-          {% endif %}
           DNS: {{ dns_server }}
           Gateway: {{ gateway }}
 
