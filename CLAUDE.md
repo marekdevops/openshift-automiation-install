@@ -8,28 +8,34 @@ Ansible automation for deploying OpenShift clusters on OpenShift Virtualization 
 
 ## Running Playbooks
 
+All playbooks use cluster configuration from `clusters/<name>.yml`:
+
 ```bash
-# Create VMs (skips existing ones)
-ansible-playbook create-virt-env.yml -e @group_vars/virt_env1.yml
+# Create VMs (auto-saves MAC addresses to config file)
+ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml
 
 # Delete VMs (dry-run by default)
-ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml
+ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml
 # Actually delete:
-ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml -e remove=yes
+ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml -e remove=yes
 
 # Generate Agent-Based Installer ISO
-ansible-playbook generate-ocp-agent-iso.yml -e @group_vars/ocp_cluster1.yml
+ansible-playbook generate-ocp-agent-iso.yml -e @clusters/ocp1.yml
 
 # Monitor installation
-ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
+ansible-playbook wait-ocp-install.yml -e @clusters/ocp1.yml
 ```
 
 ## Architecture
 
+**Configuration:**
+- `clusters/<name>.yml` — Single source of truth for each cluster (VM specs, network, nodes with MAC/IP)
+- MAC addresses are auto-populated by `create-virt-env.yml`
+
 **VM Management:**
-- `create-virt-env.yml` — Creates VMs from `virt_env1.yml`, never modifies existing VMs
-- `delete-virt-env.yml` — Removes only VMs defined in config, dry-run protection
-- `templates/vm-worker-large.yaml.j2` — Jinja2 template for large worker VMs
+- `create-virt-env.yml` — Creates VMs, waits for them to start, saves MAC addresses to config
+- `delete-virt-env.yml` — Removes VMs defined in config (dry-run protection)
+- `templates/vm-worker-large.yaml.j2` — Jinja2 template for VMs
 
 **OpenShift Installation:**
 - `generate-ocp-agent-iso.yml` — Generates `install-config.yaml`, `agent-config.yaml`, and bootable ISO
@@ -37,9 +43,13 @@ ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
 - `templates/install-config.yaml.j2` — OpenShift cluster configuration
 - `templates/agent-config.yaml.j2` — Static network config per host (MAC → IP mapping)
 
-**Configuration:**
-- `group_vars/virt_env1.yml` — VM definitions (names, CPU, RAM, disk)
-- `group_vars/ocp_cluster1.yml` — OCP cluster config (nodes, MACs, IPs, VIPs, domain)
+## Key Features
+
+- **IaC approach**: Single config file per cluster in `clusters/`
+- **Auto MAC population**: `create-virt-env.yml` saves MAC addresses back to config
+- **External LB support**: `external_lb: true` uses `loadBalancer.type: UserManaged` for F5/HAProxy
+- **Protection**: `delete-virt-env.yml` requires `-e remove=yes` to actually delete
+- **Idempotent**: `create-virt-env.yml` skips existing VMs
 
 ## Key Dependencies
 
@@ -49,7 +59,6 @@ ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
 
 ## Conventions
 
-- Playbooks use active OpenShift context (no kubeconfig path needed, just `oc login` first)
+- Playbooks use active OpenShift context (no kubeconfig path needed)
 - VMs are labeled `managed-by=ansible` for tracking
-- ISO PVC referenced as `tools-iso-pvc` by default
-- Network: pod network (masquerade) + Multus VLAN bridge
+- Network: pod network (masquerade) + Multus VLAN bridge (vlan214)

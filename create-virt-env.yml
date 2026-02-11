@@ -3,13 +3,13 @@
 # Playbook: Tworzenie maszyn wirtualnych dla środowiska
 # =============================================================================
 # Użycie:
-#   ansible-playbook create-virt-env.yml -e @group_vars/virt_env1.yml
+#   ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml
 #
 # Logika:
 #   - Istniejące VM NIE są modyfikowane (nawet jeśli parametry się różnią)
 #   - Tylko NOWE VM są tworzone z szablonu
-#   - Po utworzeniu sprawdzana jest poprawność (status VM)
-#   - Na końcu wyświetlane są MAC adresy interfejsów Multus
+#   - Po utworzeniu MAC adresy są zapisywane do pliku konfiguracyjnego
+#   - Na końcu wyświetlane są informacje o VM i MAC adresach
 # =============================================================================
 
 - name: Tworzenie maszyn wirtualnych
@@ -17,9 +17,20 @@
   connection: local
   gather_facts: false
 
+  vars:
+    # Ścieżka do pliku konfiguracyjnego (przekazana przez -e @clusters/xxx.yml)
+    cluster_config_file: "{{ lookup('env', 'PWD') }}/clusters/{{ cluster_name }}.yml"
+
   tasks:
     # =========================================================================
-    # Krok 1: Pobierz listę istniejących VM w namespace
+    # Krok 1: Walidacja
+    # =========================================================================
+    - name: "=== TWORZENIE VM DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}"
+
+    # =========================================================================
+    # Krok 2: Pobierz listę istniejących VM w namespace
     # =========================================================================
     - name: Pobierz listę istniejących VM
       kubernetes.core.k8s_info:
@@ -37,11 +48,11 @@
         msg: "Istniejące VM w namespace {{ namespace }}: {{ existing_vm_names }}"
 
     # =========================================================================
-    # Krok 2: Filtruj tylko nowe VM (których jeszcze nie ma)
+    # Krok 3: Filtruj tylko nowe VM (których jeszcze nie ma)
     # =========================================================================
     - name: Określ które VM trzeba utworzyć
       ansible.builtin.set_fact:
-        vms_to_create: "{{ vms | rejectattr('name', 'in', existing_vm_names) | list }}"
+        vms_to_create: "{{ nodes | rejectattr('name', 'in', existing_vm_names) | list }}"
 
     - name: Pokaż VM do utworzenia
       ansible.builtin.debug:
@@ -49,10 +60,10 @@
 
     - name: Pokaż VM pominięte (już istnieją)
       ansible.builtin.debug:
-        msg: "VM pominięte (już istnieją): {{ vms | selectattr('name', 'in', existing_vm_names) | map(attribute='name') | list }}"
+        msg: "VM pominięte (już istnieją): {{ nodes | selectattr('name', 'in', existing_vm_names) | map(attribute='name') | list }}"
 
     # =========================================================================
-    # Krok 3: Utwórz nowe VM z szablonu
+    # Krok 4: Utwórz nowe VM z szablonu
     # =========================================================================
     - name: Utwórz nowe maszyny wirtualne
       kubernetes.core.k8s:
@@ -60,11 +71,11 @@
         definition: "{{ lookup('template', 'templates/vm-worker-large.yaml.j2') }}"
       vars:
         vm_name: "{{ item.name }}"
-        vm_cpu_sockets: "{{ item.cpu_sockets | default(defaults.cpu_sockets) }}"
-        vm_memory: "{{ item.memory | default(defaults.memory) }}"
-        vm_disk_size: "{{ item.disk_size | default(defaults.disk_size) }}"
-        vm_max_cpu_sockets: "{{ item.max_cpu_sockets | default(defaults.max_cpu_sockets) }}"
-        vm_max_memory: "{{ item.max_memory | default(defaults.max_memory) }}"
+        vm_cpu_sockets: "{{ item.cpu_sockets | default(vm_defaults.cpu_sockets) }}"
+        vm_memory: "{{ item.memory | default(vm_defaults.memory) }}"
+        vm_disk_size: "{{ item.disk_size | default(vm_defaults.disk_size) }}"
+        vm_max_cpu_sockets: "{{ item.max_cpu_sockets | default(vm_defaults.max_cpu_sockets) }}"
+        vm_max_memory: "{{ item.max_memory | default(vm_defaults.max_memory) }}"
       loop: "{{ vms_to_create }}"
       loop_control:
         label: "{{ item.name }}"
@@ -72,7 +83,7 @@
       when: vms_to_create | length > 0
 
     # =========================================================================
-    # Krok 4: Poczekaj na utworzenie DataVolumes (provisioning dysków)
+    # Krok 5: Poczekaj na utworzenie DataVolumes (provisioning dysków)
     # =========================================================================
     - name: Poczekaj na zakończenie provisioningu DataVolumes
       kubernetes.core.k8s_info:
@@ -93,7 +104,7 @@
       when: vms_to_create | length > 0
 
     # =========================================================================
-    # Krok 5: Sprawdź czy VMI (instancje) się uruchomiły
+    # Krok 6: Sprawdź czy VMI (instancje) się uruchomiły
     # =========================================================================
     - name: Poczekaj na uruchomienie VMI
       kubernetes.core.k8s_info:
@@ -121,77 +132,169 @@
       when: vms_to_create | length > 0
 
     # =========================================================================
-    # Krok 6: Zbierz informacje o wszystkich VM
+    # Krok 7: Zbierz MAC adresy ze wszystkich VM
     # =========================================================================
-    - name: Pobierz informacje o wszystkich VMI
+    - name: Pobierz informacje o VMI dla wszystkich nodów
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
         namespace: "{{ namespace }}"
-        label_selectors:
-          - managed-by=ansible
-      register: all_vmis
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: all_vmis_info
 
+    - name: Zbuduj mapę VM → MAC (vlan214)
+      ansible.builtin.set_fact:
+        vm_mac_map: >-
+          {{
+            vm_mac_map | default({}) | combine({
+              item.item.name: (item.resources[0].status.interfaces | default([]) | selectattr('name', 'equalto', 'vlan214') | first | default({})).mac | default('')
+            })
+          }}
+      loop: "{{ all_vmis_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.resources | length > 0
+
+    # =========================================================================
+    # Krok 8: Podsumowanie VM i MAC adresów
+    # =========================================================================
     - name: Pobierz informacje o wszystkich VM (spec)
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachine
         namespace: "{{ namespace }}"
-        label_selectors:
-          - managed-by=ansible
-      register: all_vms
-
-    # =========================================================================
-    # Krok 7: Podsumowanie parametrów VM (CPU, RAM, Storage)
-    # =========================================================================
-    - name: "=== PODSUMOWANIE MASZYN WIRTUALNYCH ==="
-      ansible.builtin.debug:
-        msg: "Znaleziono {{ all_vms.resources | length }} VM z etykietą managed-by=ansible"
-
-    - name: Podsumowanie parametrów VM
-      ansible.builtin.debug:
-        msg: >-
-          {{ item.metadata.name }} |
-          CPU: {{ item.spec.template.spec.domain.cpu.sockets | default('?') }} sockets x
-          {{ item.spec.template.spec.domain.cpu.cores | default('?') }} cores |
-          RAM: {{ item.spec.template.spec.domain.memory.guest | default('?') }} |
-          Dysk: {{ (item.spec.dataVolumeTemplates | first).spec.storage.resources.requests.storage | default('?') }}
-      loop: "{{ all_vms.resources }}"
-      loop_control:
-        label: "{{ item.metadata.name }}"
-      when: all_vms.resources | length > 0
-
-    # =========================================================================
-    # Krok 8: Informacje o sieciach i MAC adresach
-    # =========================================================================
-    - name: Zbierz informacje o interfejsach sieciowych
-      ansible.builtin.set_fact:
-        vm_network_info: >-
-          {{
-            all_vmis.resources | map('json_query', '{
-              name: metadata.name,
-              interfaces: status.interfaces
-            }') | list
-          }}
-
-    - name: "=== INTERFEJSY SIECIOWE ==="
-      ansible.builtin.debug:
-        msg: "{{ item.0.name }} | {{ item.1.name }}: MAC={{ item.1.mac | default('brak') }}"
-      loop: "{{ vm_network_info | subelements('interfaces', skip_missing=True) }}"
-      loop_control:
-        label: "{{ item.0.name }} - {{ item.1.name }}"
-      when: vm_network_info | length > 0
-
-    # =========================================================================
-    # Krok 9: Podsumowanie — MAC adresy vlan214 (Multus)
-    # =========================================================================
-    - name: "=== MAC ADRESY VLAN214 (MULTUS) ==="
-      ansible.builtin.debug:
-        msg: "{{ item.name }}: {{ vlan_mac }}"
-      loop: "{{ vm_network_info }}"
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }}"
+      register: all_vms_info
+
+    - name: "=== PODSUMOWANIE MASZYN WIRTUALNYCH ==="
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.resources[0].metadata.name }} |
+          CPU: {{ item.resources[0].spec.template.spec.domain.cpu.sockets | default('?') }} |
+          RAM: {{ item.resources[0].spec.template.spec.domain.memory.guest | default('?') }} |
+          MAC(vlan214): {{ vm_mac_map[item.resources[0].metadata.name] | default('brak') }}
+      loop: "{{ all_vms_info.results }}"
+      loop_control:
+        label: "{{ item.resources[0].metadata.name | default('?') }}"
+      when: item.resources | length > 0
+
+    # =========================================================================
+    # Krok 9: Zaktualizuj plik konfiguracyjny z MAC adresami
+    # =========================================================================
+    - name: Wczytaj aktualny plik konfiguracyjny
+      ansible.builtin.slurp:
+        src: "{{ cluster_config_file }}"
+      register: config_file_content
+
+    - name: Parsuj YAML
+      ansible.builtin.set_fact:
+        config_data: "{{ config_file_content.content | b64decode | from_yaml }}"
+
+    - name: Zaktualizuj MAC adresy w konfiguracji
+      ansible.builtin.set_fact:
+        updated_nodes: >-
+          {{
+            config_data.nodes | map('combine', {
+              'mac': vm_mac_map[item.name] | default(item.mac)
+            }) | list
+          }}
       vars:
-        vlan_iface: "{{ item.interfaces | default([]) | selectattr('name', 'equalto', 'vlan214') | first | default({}) }}"
-        vlan_mac: "{{ vlan_iface.mac | default('brak') }}"
-      when: vm_network_info | length > 0
+        item: "{{ config_data.nodes }}"
+
+    - name: Przygotuj zaktualizowaną konfigurację
+      ansible.builtin.set_fact:
+        updated_nodes_list: []
+
+    - name: Buduj listę nodów z MAC
+      ansible.builtin.set_fact:
+        updated_nodes_list: "{{ updated_nodes_list + [item | combine({'mac': vm_mac_map[item.name] | default(item.mac)})] }}"
+      loop: "{{ config_data.nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Zapisz zaktualizowaną konfigurację
+      ansible.builtin.copy:
+        content: |
+          # =============================================================================
+          # Konfiguracja klastra: {{ cluster_name }}
+          # =============================================================================
+          # UWAGA: MAC adresy zostały uzupełnione automatycznie.
+          # Sprawdź IP adresy przed uruchomieniem generate-ocp-agent-iso.yml
+          # =============================================================================
+
+          # -----------------------------------------------------------------------------
+          # Klaster
+          # -----------------------------------------------------------------------------
+          cluster_name: {{ cluster_name }}
+          base_domain: {{ base_domain }}
+
+          # -----------------------------------------------------------------------------
+          # VM - OpenShift Virtualization
+          # -----------------------------------------------------------------------------
+          namespace: {{ namespace }}
+          iso_pvc_name: {{ iso_pvc_name }}
+          multus_network: {{ multus_network }}
+
+          vm_defaults:
+            cpu_sockets: {{ vm_defaults.cpu_sockets }}
+            memory: {{ vm_defaults.memory }}
+            disk_size: {{ vm_defaults.disk_size }}
+            max_cpu_sockets: {{ vm_defaults.max_cpu_sockets }}
+            max_memory: {{ vm_defaults.max_memory }}
+
+          # -----------------------------------------------------------------------------
+          # Sieć
+          # -----------------------------------------------------------------------------
+          machine_network: {{ machine_network }}
+          dns_server: {{ dns_server }}
+          gateway: {{ gateway }}
+
+          api_vip: {{ api_vip }}
+          ingress_vip: {{ ingress_vip }}
+          external_lb: {{ external_lb }}
+
+          cluster_network_cidr: {{ cluster_network_cidr }}
+          cluster_network_prefix: {{ cluster_network_prefix }}
+          service_network_cidr: {{ service_network_cidr }}
+
+          # -----------------------------------------------------------------------------
+          # Nodes
+          # -----------------------------------------------------------------------------
+          nodes:
+          {% for node in updated_nodes_list %}
+            - name: {{ node.name }}
+              hostname: {{ node.hostname }}
+              role: {{ node.role }}
+              mac: "{{ node.mac }}"
+              ip: {{ node.ip }}
+          {% endfor %}
+
+          # -----------------------------------------------------------------------------
+          # Opcje instalacji
+          # -----------------------------------------------------------------------------
+          single_node: {{ single_node }}
+          fips_enabled: {{ fips_enabled }}
+        dest: "{{ cluster_config_file }}"
+        mode: '0644'
+
+    - name: "=== PLIK KONFIGURACYJNY ZAKTUALIZOWANY ==="
+      ansible.builtin.debug:
+        msg: |
+          MAC adresy zostały zapisane do: {{ cluster_config_file }}
+
+          Następne kroki:
+          1. Sprawdź/uzupełnij IP adresy w pliku {{ cluster_config_file }}
+          2. Uruchom: ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
+
+    - name: "=== TABELA NODÓW ==="
+      ansible.builtin.debug:
+        msg: "{{ item.name }} | {{ item.hostname }} | {{ item.role }} | MAC: {{ vm_mac_map[item.name] | default('brak') }} | IP: {{ item.ip }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"

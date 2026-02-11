@@ -1,0 +1,109 @@
+# =============================================================================
+# Konfiguracja klastra: ocp1
+# =============================================================================
+# Ten plik zawiera TYLKO dane specyficzne dla klastra.
+# Reszta jest generowana automatycznie.
+#
+# Workflow:
+#   1. Wypełnij sekcję "Klaster" i "Sieć"
+#   2. Uruchom: ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml
+#      → VM zostaną utworzone, MAC adresy uzupełnione automatycznie
+#   3. Uzupełnij IP dla każdego node'a w sekcji "Nodes"
+#   4. Uruchom: ansible-playbook generate-ocp-agent-iso.yml -e @clusters/ocp1.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Klaster
+# -----------------------------------------------------------------------------
+cluster_name: ocp1
+base_domain: example.com
+
+# -----------------------------------------------------------------------------
+# Ścieżki (opcjonalne - domyślne wartości poniżej)
+# -----------------------------------------------------------------------------
+# openshift_install_binary: /usr/local/bin/openshift-install
+# pull_secret_file: ~/.openshift/pull-secret.json
+# ssh_public_key_file: ~/.ssh/id_ed25519.pub
+# install_dir: /tmp/ocp-install/{{ cluster_name }}
+
+# -----------------------------------------------------------------------------
+# VM - OpenShift Virtualization
+# -----------------------------------------------------------------------------
+namespace: proj-vms
+iso_pvc_name: agent-iso-pvc
+multus_network: default/vlan214-net
+
+# Domyślne zasoby VM (można nadpisać per-node)
+vm_defaults:
+  cpu_sockets: 8
+  memory: 32Gi
+  disk_size: 120Gi
+  max_cpu_sockets: 16
+  max_memory: 64Gi
+
+# -----------------------------------------------------------------------------
+# Sieć
+# -----------------------------------------------------------------------------
+machine_network: 192.168.214.0/24
+dns_server: 192.168.214.1
+gateway: 192.168.214.1
+
+# VIP (wystawiane przez F5 / zewnętrzny LB)
+api_vip: 192.168.214.100
+ingress_vip: 192.168.214.101
+
+# Zewnętrzny load balancer (F5, HAProxy)
+external_lb: true
+
+# -----------------------------------------------------------------------------
+# Sieci wewnętrzne klastra (zazwyczaj nie zmieniaj)
+# -----------------------------------------------------------------------------
+cluster_network_cidr: 10.128.0.0/14
+cluster_network_prefix: 23
+service_network_cidr: 172.30.0.0/16
+
+# -----------------------------------------------------------------------------
+# Nodes
+# -----------------------------------------------------------------------------
+# MAC adresy są uzupełniane automatycznie przez create-virt-env.yml
+# Ty musisz tylko uzupełnić IP dla każdego node'a.
+#
+# Role: master (min. 3) lub worker (opcjonalne)
+
+nodes:
+  - name: ocp1-master-0           # nazwa VM w OpenShift Virtualization
+    hostname: master-0            # hostname w klastrze OCP
+    role: master
+    mac: ""                       # <- uzupełniane automatycznie
+    ip: 192.168.214.10            # <- uzupełnij
+
+  - name: ocp1-master-1
+    hostname: master-1
+    role: master
+    mac: ""
+    ip: 192.168.214.11
+
+  - name: ocp1-master-2
+    hostname: master-2
+    role: master
+    mac: ""
+    ip: 192.168.214.12
+
+  - name: ocp1-worker-0
+    hostname: worker-0
+    role: worker
+    mac: ""
+    ip: 192.168.214.20
+
+  # Dodaj więcej workerów:
+  # - name: ocp1-worker-1
+  #   hostname: worker-1
+  #   role: worker
+  #   mac: ""
+  #   ip: 192.168.214.21
+
+# -----------------------------------------------------------------------------
+# Opcje instalacji
+# -----------------------------------------------------------------------------
+single_node: false
+fips_enabled: false

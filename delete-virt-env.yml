@@ -4,10 +4,10 @@
 # =============================================================================
 # Użycie:
 #   # Dry-run (domyślnie) - tylko pokazuje co zostanie usunięte:
-#   ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml
+#   ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml
 #
 #   # Faktyczne usunięcie:
-#   ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml -e remove=yes
+#   ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml -e remove=yes
 #
 # Logika:
 #   - Usuwa TYLKO maszyny zdefiniowane w pliku konfiguracyjnym
@@ -30,7 +30,7 @@
     # =========================================================================
     - name: Lista VM do usunięcia (z konfiguracji)
       ansible.builtin.set_fact:
-        vms_from_config: "{{ vms | map(attribute='name') | list }}"
+        vms_from_config: "{{ nodes | map(attribute='name') | list }}"
 
     - name: "=== MASZYNY ZDEFINIOWANE W KONFIGURACJI ==="
       ansible.builtin.debug:

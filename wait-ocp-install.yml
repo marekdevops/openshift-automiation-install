@@ -3,7 +3,7 @@
 # Playbook: Monitorowanie instalacji OpenShift
 # =============================================================================
 # Użycie:
-#   ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
+#   ansible-playbook wait-ocp-install.yml -e @clusters/ocp1.yml
 #
 # Opcje:
 #   -e stage=bootstrap    # czekaj tylko na bootstrap

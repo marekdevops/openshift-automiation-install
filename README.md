@@ -21,63 +21,127 @@ This project automates:
 
 ## Quick Start
 
-### 1. Create VMs
+### 1. Create Cluster Configuration
 
-Edit `group_vars/virt_env1.yml` with your VM definitions, then:
+Copy and edit the example configuration:
 
 ```bash
-ansible-playbook create-virt-env.yml -e @group_vars/virt_env1.yml
+cp clusters/ocp1.yml clusters/mycluster.yml
 ```
 
-Note the MAC addresses from the output (vlan214 interface).
+Edit `clusters/mycluster.yml`:
+- Set `cluster_name`, `base_domain`
+- Configure network settings (`machine_network`, `api_vip`, `ingress_vip`)
+- Define nodes with hostnames, roles, and IPs
 
-### 2. Configure OpenShift Cluster
-
-Edit `group_vars/ocp_cluster1.yml`:
-- Set MAC addresses from step 1
-- Configure IPs, cluster name, domain
-- Set API and Ingress VIPs
-
-### 3. Generate Agent ISO
+### 2. Create VMs
 
 ```bash
-ansible-playbook generate-ocp-agent-iso.yml -e @group_vars/ocp_cluster1.yml
+ansible-playbook create-virt-env.yml -e @clusters/mycluster.yml
 ```
 
-### 4. Boot VMs from ISO
+This will:
+- Create VMs in OpenShift Virtualization
+- Wait for VMs to start
+- **Automatically save MAC addresses** to the config file
 
-Upload the generated ISO (`/tmp/ocp-install/<cluster>/agent.x86_64.iso`) to a PVC and attach it to VMs.
+### 3. Verify Configuration
 
-### 5. Monitor Installation
+Check `clusters/mycluster.yml` — MAC addresses are now populated. Verify IP addresses are correct.
+
+### 4. Generate Agent ISO
 
 ```bash
-ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
+ansible-playbook generate-ocp-agent-iso.yml -e @clusters/mycluster.yml
+```
+
+Output: `/tmp/ocp-install/<cluster>/agent.x86_64.iso`
+
+### 5. Boot VMs from ISO
+
+Upload ISO and attach to VMs:
+
+```bash
+virtctl image-upload pvc agent-iso-pvc \
+  --size=2Gi \
+  --image-path=/tmp/ocp-install/mycluster/agent.x86_64.iso \
+  -n <namespace>
+```
+
+Restart VMs to boot from ISO.
+
+### 6. Monitor Installation
+
+```bash
+ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml
 ```
 
 ## Playbooks
 
 | Playbook | Description |
 |----------|-------------|
-| `create-virt-env.yml` | Creates VMs (skips existing) |
+| `create-virt-env.yml` | Creates VMs, saves MAC addresses to config |
 | `delete-virt-env.yml` | Deletes VMs (dry-run by default, use `-e remove=yes`) |
 | `generate-ocp-agent-iso.yml` | Generates Agent-Based Installer ISO |
 | `wait-ocp-install.yml` | Monitors installation progress |
 
-## Configuration Files
+## Configuration
 
-| File | Description |
-|------|-------------|
-| `group_vars/virt_env1.yml` | VM definitions (CPU, RAM, disk, network) |
-| `group_vars/ocp_cluster1.yml` | OpenShift cluster config (nodes, IPs, MACs) |
-| `templates/vm-worker-large.yaml.j2` | VM template for KubeVirt |
-| `templates/install-config.yaml.j2` | OpenShift install-config template |
-| `templates/agent-config.yaml.j2` | Agent config with static network |
+All configuration is in `clusters/<name>.yml`:
+
+```yaml
+# Cluster identity
+cluster_name: ocp1
+base_domain: example.com
+
+# VM settings
+namespace: proj-vms
+vm_defaults:
+  cpu_sockets: 8
+  memory: 32Gi
+  disk_size: 120Gi
+
+# Network
+machine_network: 192.168.214.0/24
+api_vip: 192.168.214.100      # F5/LB VIP for API
+ingress_vip: 192.168.214.101  # F5/LB VIP for Apps
+external_lb: true             # Using external load balancer
+
+# Nodes (MAC auto-populated by create-virt-env.yml)
+nodes:
+  - name: ocp1-master-0
+    hostname: master-0
+    role: master
+    mac: ""                   # <- auto-filled
+    ip: 192.168.214.10
+```
+
+## DNS Requirements
+
+Configure DNS before installation:
+
+```
+api.<cluster>.<domain>     → api_vip
+api-int.<cluster>.<domain> → api_vip
+*.apps.<cluster>.<domain>  → ingress_vip
+```
+
+## Load Balancer Configuration
+
+For F5/HAProxy, configure pools:
+
+| VIP | Port | Backend Pool |
+|-----|------|--------------|
+| api_vip | 6443 | All masters |
+| api_vip | 22623 | All masters |
+| ingress_vip | 80 | All workers (or masters if no workers) |
+| ingress_vip | 443 | All workers (or masters if no workers) |
 
 ## VM Features
 
 - Host-passthrough CPU model
-- CPU hotplug (up to 64 sockets)
-- Memory hotplug (up to 1Ti)
+- CPU hotplug (configurable max)
+- Memory hotplug (configurable max)
 - Dual NIC: pod network + Multus VLAN
 - Multiqueue for network/disk
 - Live migration support

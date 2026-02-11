@@ -3,7 +3,7 @@
 # Playbook: Generowanie ISO dla Agent-Based Installer
 # =============================================================================
 # Użycie:
-#   ansible-playbook generate-ocp-agent-iso.yml -e @group_vars/ocp_cluster1.yml
+#   ansible-playbook generate-ocp-agent-iso.yml -e @clusters/ocp1.yml
 #
 # Wymagania:
 #   - openshift-install binary (pobierz z mirror.openshift.com)
@@ -19,6 +19,13 @@
   hosts: localhost
   connection: local
   gather_facts: false
+
+  vars:
+    # Domyślne wartości (można nadpisać w pliku klastra)
+    openshift_install_binary: /usr/local/bin/openshift-install
+    pull_secret_file: ~/.openshift/pull-secret.json
+    ssh_public_key_file: ~/.ssh/id_ed25519.pub
+    install_dir: "/tmp/ocp-install/{{ cluster_name }}"
 
   tasks:
     # =========================================================================
