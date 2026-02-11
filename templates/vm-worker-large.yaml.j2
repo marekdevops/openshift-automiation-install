@@ -1,0 +1,92 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ vm_name }}
+  namespace: {{ namespace }}
+  labels:
+    app: ocp-worker
+    variant: large
+    managed-by: ansible
+spec:
+  runStrategy: Always
+
+  dataVolumeTemplates:
+    - metadata:
+        name: {{ vm_name }}-rootdisk
+      spec:
+        source:
+          blank: {}
+        storage:
+          resources:
+            requests:
+              storage: {{ vm_disk_size }}
+          accessModes:
+            - ReadWriteMany
+
+  template:
+    metadata:
+      labels:
+        app: ocp-worker
+        variant: large
+        managed-by: ansible
+    spec:
+      evictionStrategy: LiveMigrate
+
+      domain:
+        machine:
+          type: q35
+
+        cpu:
+          model: host-passthrough
+          sockets: {{ vm_cpu_sockets }}
+          cores: 1
+          threads: 1
+          maxSockets: {{ vm_max_cpu_sockets }}
+
+        memory:
+          guest: {{ vm_memory }}
+          maxGuest: {{ vm_max_memory }}
+
+        ioThreadsPolicy: auto
+
+        devices:
+          networkInterfaceMultiqueue: true
+          blockMultiQueue: true
+          rng: {}
+          autoattachGraphicsDevice: true
+
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+              # bootOrder: 1
+            - name: cdrom-iso
+              cdrom:
+                bus: sata
+              bootOrder: 1
+
+          interfaces:
+            - name: default
+              masquerade: {}
+              model: virtio
+            - name: vlan214
+              bridge: {}
+              model: virtio
+
+        resources: {}
+
+      networks:
+        - name: default
+          pod: {}
+        - name: vlan214
+          multus:
+            networkName: {{ multus_network }}
+
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: {{ vm_name }}-rootdisk
+        - name: cdrom-iso
+          persistentVolumeClaim:
+            claimName: {{ iso_pvc_name }}

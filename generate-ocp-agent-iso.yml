@@ -1,0 +1,196 @@
+---
+# =============================================================================
+# Playbook: Generowanie ISO dla Agent-Based Installer
+# =============================================================================
+# Użycie:
+#   ansible-playbook generate-ocp-agent-iso.yml -e @group_vars/ocp_cluster1.yml
+#
+# Wymagania:
+#   - openshift-install binary (pobierz z mirror.openshift.com)
+#   - pull-secret.json z console.redhat.com
+#   - klucz SSH
+#   - ansible-galaxy collection install ansible.utils (dla filtrów ipaddr)
+#
+# Output:
+#   - {{ install_dir }}/agent.x86_64.iso — ISO do bootowania VM
+# =============================================================================
+
+- name: Generowanie Agent-Based Installer ISO
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Walidacja wymagań
+    # =========================================================================
+    - name: "=== WALIDACJA WYMAGAŃ ==="
+      ansible.builtin.debug:
+        msg: "Sprawdzam wymagania..."
+
+    - name: Sprawdź czy openshift-install istnieje
+      ansible.builtin.stat:
+        path: "{{ openshift_install_binary }}"
+      register: oi_binary
+
+    - name: Błąd — brak openshift-install
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono openshift-install w {{ openshift_install_binary }}
+          Pobierz z: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/
+      when: not oi_binary.stat.exists
+
+    - name: Sprawdź czy pull-secret istnieje
+      ansible.builtin.stat:
+        path: "{{ pull_secret_file }}"
+      register: ps_file
+
+    - name: Błąd — brak pull-secret
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono pull-secret w {{ pull_secret_file }}
+          Pobierz z: https://console.redhat.com/openshift/install/pull-secret
+      when: not ps_file.stat.exists
+
+    - name: Sprawdź czy klucz SSH istnieje
+      ansible.builtin.stat:
+        path: "{{ ssh_public_key_file }}"
+      register: ssh_file
+
+    - name: Błąd — brak klucza SSH
+      ansible.builtin.fail:
+        msg: "Nie znaleziono klucza SSH w {{ ssh_public_key_file }}"
+      when: not ssh_file.stat.exists
+
+    - name: Wczytaj pull-secret
+      ansible.builtin.slurp:
+        src: "{{ pull_secret_file }}"
+      register: pull_secret_raw
+
+    - name: Wczytaj klucz SSH
+      ansible.builtin.slurp:
+        src: "{{ ssh_public_key_file }}"
+      register: ssh_key_raw
+
+    - name: Ustaw zmienne z plikami
+      ansible.builtin.set_fact:
+        pull_secret_content: "{{ pull_secret_raw.content | b64decode | trim | replace('\n', '') }}"
+        ssh_public_key_content: "{{ ssh_key_raw.content | b64decode | trim }}"
+
+    # =========================================================================
+    # Krok 2: Podsumowanie konfiguracji
+    # =========================================================================
+    - name: "=== KONFIGURACJA KLASTRA ==="
+      ansible.builtin.debug:
+        msg: "Klaster: {{ cluster_name }}.{{ base_domain }}"
+
+    - name: Podsumowanie nodów
+      ansible.builtin.debug:
+        msg: "{{ item.hostname }} | {{ item.role }} | MAC: {{ item.mac }} | IP: {{ item.ip }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+
+    - name: Podsumowanie sieci
+      ansible.builtin.debug:
+        msg: |
+          Machine network: {{ machine_network }}
+          API VIP: {{ api_vip }}
+          Ingress VIP: {{ ingress_vip }}
+          DNS: {{ dns_server }}
+          Gateway: {{ gateway }}
+
+    # =========================================================================
+    # Krok 3: Przygotuj katalog instalacyjny
+    # =========================================================================
+    - name: Usuń stary katalog instalacyjny (jeśli istnieje)
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: absent
+
+    - name: Utwórz katalog instalacyjny
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: directory
+        mode: '0755'
+
+    # =========================================================================
+    # Krok 4: Wygeneruj pliki konfiguracyjne
+    # =========================================================================
+    - name: "=== GENEROWANIE PLIKÓW KONFIGURACYJNYCH ==="
+      ansible.builtin.debug:
+        msg: "Generuję install-config.yaml i agent-config.yaml..."
+
+    - name: Wygeneruj install-config.yaml
+      ansible.builtin.template:
+        src: templates/install-config.yaml.j2
+        dest: "{{ install_dir }}/install-config.yaml"
+        mode: '0600'
+
+    - name: Wygeneruj agent-config.yaml
+      ansible.builtin.template:
+        src: templates/agent-config.yaml.j2
+        dest: "{{ install_dir }}/agent-config.yaml"
+        mode: '0600'
+
+    - name: Pokaż wygenerowany install-config.yaml (bez secretów)
+      ansible.builtin.shell: |
+        cat {{ install_dir }}/install-config.yaml | grep -v pullSecret | grep -v sshKey
+      register: install_config_preview
+      changed_when: false
+
+    - name: Preview install-config.yaml
+      ansible.builtin.debug:
+        msg: "{{ install_config_preview.stdout_lines }}"
+
+    # =========================================================================
+    # Krok 5: Wygeneruj ISO
+    # =========================================================================
+    - name: "=== GENEROWANIE ISO ==="
+      ansible.builtin.debug:
+        msg: "Generuję agent.x86_64.iso... (to może potrwać kilka minut)"
+
+    - name: Uruchom openshift-install agent create image
+      ansible.builtin.command:
+        cmd: "{{ openshift_install_binary }} agent create image --dir={{ install_dir }}"
+      register: create_image_result
+      changed_when: true
+
+    - name: Sprawdź czy ISO zostało utworzone
+      ansible.builtin.stat:
+        path: "{{ install_dir }}/agent.x86_64.iso"
+      register: iso_file
+
+    - name: Błąd — ISO nie zostało utworzone
+      ansible.builtin.fail:
+        msg: |
+          Nie udało się utworzyć ISO.
+          Output: {{ create_image_result.stderr | default('brak') }}
+      when: not iso_file.stat.exists
+
+    # =========================================================================
+    # Krok 6: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          ISO utworzone pomyślnie!
+
+          Plik: {{ install_dir }}/agent.x86_64.iso
+          Rozmiar: {{ (iso_file.stat.size / 1024 / 1024) | round(1) }} MB
+
+          Następne kroki:
+          1. Upload ISO do PVC w OpenShift Virtualization
+          2. Zmień CDROM w VM na nowe ISO
+          3. Ustaw boot z CDROM (bootOrder: 1)
+          4. Zrestartuj VM
+          5. Monitoruj instalację: {{ openshift_install_binary }} agent wait-for install-complete --dir={{ install_dir }}
+
+    - name: Zapisz ścieżkę do ISO
+      ansible.builtin.copy:
+        content: |
+          ISO_PATH={{ install_dir }}/agent.x86_64.iso
+          CLUSTER_NAME={{ cluster_name }}
+          INSTALL_DIR={{ install_dir }}
+        dest: "{{ install_dir }}/install-info.env"
+        mode: '0644'

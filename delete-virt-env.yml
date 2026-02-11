@@ -1,0 +1,159 @@
+---
+# =============================================================================
+# Playbook: Usuwanie maszyn wirtualnych ze środowiska
+# =============================================================================
+# Użycie:
+#   # Dry-run (domyślnie) - tylko pokazuje co zostanie usunięte:
+#   ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml
+#
+#   # Faktyczne usunięcie:
+#   ansible-playbook delete-virt-env.yml -e @group_vars/virt_env1.yml -e remove=yes
+#
+# Logika:
+#   - Usuwa TYLKO maszyny zdefiniowane w pliku konfiguracyjnym
+#   - Domyślnie dry-run - pokazuje co zostanie usunięte bez wykonywania
+#   - Wymaga explicit -e remove=yes żeby faktycznie usunąć
+#   - Usuwa VM wraz z DataVolumes (dyskami)
+# =============================================================================
+
+- name: Usuwanie maszyn wirtualnych
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    remove: "no"
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Pobierz listę VM zdefiniowanych w konfiguracji
+    # =========================================================================
+    - name: Lista VM do usunięcia (z konfiguracji)
+      ansible.builtin.set_fact:
+        vms_from_config: "{{ vms | map(attribute='name') | list }}"
+
+    - name: "=== MASZYNY ZDEFINIOWANE W KONFIGURACJI ==="
+      ansible.builtin.debug:
+        msg: "{{ vms_from_config }}"
+
+    # =========================================================================
+    # Krok 2: Sprawdź które z nich istnieją na klastrze
+    # =========================================================================
+    - name: Pobierz listę istniejących VM w namespace
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+      register: existing_vms
+
+    - name: Zbuduj listę nazw istniejących VM
+      ansible.builtin.set_fact:
+        existing_vm_names: "{{ existing_vms.resources | map(attribute='metadata.name') | list }}"
+
+    - name: Określ które VM istnieją i będą usunięte
+      ansible.builtin.set_fact:
+        vms_to_delete: "{{ vms_from_config | intersect(existing_vm_names) }}"
+
+    - name: Określ które VM nie istnieją (pominięte)
+      ansible.builtin.set_fact:
+        vms_not_found: "{{ vms_from_config | difference(existing_vm_names) }}"
+
+    # =========================================================================
+    # Krok 3: Pokaż podsumowanie (dry-run)
+    # =========================================================================
+    - name: "=== DRY-RUN: PODSUMOWANIE ==="
+      ansible.builtin.debug:
+        msg: "Tryb: {{ 'USUWANIE' if remove | bool else 'DRY-RUN (podaj -e remove=yes aby usunąć)' }}"
+
+    - name: "VM do usunięcia (istnieją na klastrze)"
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ vms_to_delete }}"
+      when: vms_to_delete | length > 0
+
+    - name: "VM nie znalezione (już nie istnieją)"
+      ansible.builtin.debug:
+        msg: "{{ item }} - nie istnieje, pomijam"
+      loop: "{{ vms_not_found }}"
+      when: vms_not_found | length > 0
+
+    - name: "Brak VM do usunięcia"
+      ansible.builtin.debug:
+        msg: "Żadna z VM z konfiguracji nie istnieje na klastrze"
+      when: vms_to_delete | length == 0
+
+    # =========================================================================
+    # Krok 4: Pokaż szczegóły VM przed usunięciem
+    # =========================================================================
+    - name: Pobierz szczegóły VM do usunięcia
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      loop: "{{ vms_to_delete }}"
+      register: vms_details
+      when: vms_to_delete | length > 0
+
+    - name: "=== SZCZEGÓŁY VM DO USUNIĘCIA ==="
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.resources[0].metadata.name }} |
+          CPU: {{ item.resources[0].spec.template.spec.domain.cpu.sockets | default('?') }} sockets |
+          RAM: {{ item.resources[0].spec.template.spec.domain.memory.guest | default('?') }} |
+          Status: {{ item.resources[0].status.printableStatus | default('?') }}
+      loop: "{{ vms_details.results }}"
+      loop_control:
+        label: "{{ item.resources[0].metadata.name | default('?') }}"
+      when:
+        - vms_to_delete | length > 0
+        - item.resources | length > 0
+
+    # =========================================================================
+    # Krok 5: Usuń VM (tylko jeśli remove=yes)
+    # =========================================================================
+    - name: "=== USUWANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Rozpoczynam usuwanie {{ vms_to_delete | length }} maszyn..."
+      when:
+        - remove | bool
+        - vms_to_delete | length > 0
+
+    - name: Usuń maszyny wirtualne
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: absent
+        wait: yes
+        wait_timeout: 300
+      loop: "{{ vms_to_delete }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - remove | bool
+        - vms_to_delete | length > 0
+
+    - name: "=== USUNIĘTO POMYŚLNIE ==="
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ vms_to_delete }}"
+      when:
+        - remove | bool
+        - vms_to_delete | length > 0
+
+    # =========================================================================
+    # Krok 6: Informacja końcowa
+    # =========================================================================
+    - name: "=== KONIEC (DRY-RUN) ==="
+      ansible.builtin.debug:
+        msg: "Aby faktycznie usunąć VM, uruchom z parametrem: -e remove=yes"
+      when: not remove | bool
+
+    - name: "=== KONIEC ==="
+      ansible.builtin.debug:
+        msg: "Usunięto {{ vms_to_delete | length }} maszyn wirtualnych"
+      when:
+        - remove | bool
+        - vms_to_delete | length > 0

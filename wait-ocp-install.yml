@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# Playbook: Monitorowanie instalacji OpenShift
+# =============================================================================
+# Użycie:
+#   ansible-playbook wait-ocp-install.yml -e @group_vars/ocp_cluster1.yml
+#
+# Opcje:
+#   -e stage=bootstrap    # czekaj tylko na bootstrap
+#   -e stage=complete     # czekaj na pełną instalację (domyślnie)
+# =============================================================================
+
+- name: Monitorowanie instalacji OpenShift
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    stage: complete
+
+  tasks:
+    - name: "=== MONITOROWANIE INSTALACJI ==="
+      ansible.builtin.debug:
+        msg: "Klaster: {{ cluster_name }}.{{ base_domain }} | Etap: {{ stage }}"
+
+    - name: Sprawdź czy katalog instalacyjny istnieje
+      ansible.builtin.stat:
+        path: "{{ install_dir }}"
+      register: install_dir_stat
+
+    - name: Błąd — brak katalogu instalacyjnego
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono katalogu instalacyjnego: {{ install_dir }}
+          Najpierw uruchom: ansible-playbook generate-ocp-agent-iso.yml -e @group_vars/ocp_cluster1.yml
+      when: not install_dir_stat.stat.exists
+
+    # =========================================================================
+    # Czekaj na bootstrap (opcjonalnie)
+    # =========================================================================
+    - name: "=== CZEKAM NA BOOTSTRAP ==="
+      ansible.builtin.debug:
+        msg: "To może potrwać 15-30 minut..."
+      when: stage == 'bootstrap' or stage == 'complete'
+
+    - name: Czekaj na zakończenie bootstrap
+      ansible.builtin.command:
+        cmd: "{{ openshift_install_binary }} agent wait-for bootstrap-complete --dir={{ install_dir }}"
+      register: bootstrap_result
+      when: stage == 'bootstrap' or stage == 'complete'
+      changed_when: false
+
+    - name: Bootstrap zakończony
+      ansible.builtin.debug:
+        msg: "Bootstrap zakończony pomyślnie!"
+      when: stage == 'bootstrap' or stage == 'complete'
+
+    # =========================================================================
+    # Czekaj na pełną instalację
+    # =========================================================================
+    - name: "=== CZEKAM NA PEŁNĄ INSTALACJĘ ==="
+      ansible.builtin.debug:
+        msg: "To może potrwać 30-60 minut..."
+      when: stage == 'complete'
+
+    - name: Czekaj na zakończenie instalacji
+      ansible.builtin.command:
+        cmd: "{{ openshift_install_binary }} agent wait-for install-complete --dir={{ install_dir }}"
+      register: install_result
+      when: stage == 'complete'
+      changed_when: false
+
+    # =========================================================================
+    # Podsumowanie
+    # =========================================================================
+    - name: "=== INSTALACJA ZAKOŃCZONA ==="
+      ansible.builtin.debug:
+        msg: |
+          Klaster {{ cluster_name }}.{{ base_domain }} zainstalowany!
+
+          Credentials:
+          {{ install_result.stdout | default('Sprawdź: ' + install_dir + '/auth/') }}
+
+          Pliki:
+          - kubeconfig: {{ install_dir }}/auth/kubeconfig
+          - kubeadmin password: {{ install_dir }}/auth/kubeadmin-password
+
+          Logowanie:
+          export KUBECONFIG={{ install_dir }}/auth/kubeconfig
+          oc whoami
+      when: stage == 'complete'
+
+    - name: Wczytaj hasło kubeadmin
+      ansible.builtin.slurp:
+        src: "{{ install_dir }}/auth/kubeadmin-password"
+      register: kubeadmin_pass
+      when: stage == 'complete'
+      ignore_errors: true
+
+    - name: "=== DANE DOSTĘPOWE ==="
+      ansible.builtin.debug:
+        msg: |
+          Console: https://console-openshift-console.apps.{{ cluster_name }}.{{ base_domain }}
+          API: https://api.{{ cluster_name }}.{{ base_domain }}:6443
+          User: kubeadmin
+          Password: {{ kubeadmin_pass.content | b64decode | default('sprawdź plik auth/kubeadmin-password') }}
+      when:
+        - stage == 'complete'
+        - kubeadmin_pass is defined

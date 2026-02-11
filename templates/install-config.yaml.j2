@@ -1,0 +1,43 @@
+---
+apiVersion: v1
+metadata:
+  name: {{ cluster_name }}
+baseDomain: {{ base_domain }}
+
+{% if single_node | default(false) | bool %}
+# Single Node OpenShift
+compute:
+  - name: worker
+    replicas: 0
+controlPlane:
+  name: master
+  replicas: 1
+{% else %}
+# Multi-node cluster
+compute:
+  - name: worker
+    replicas: {{ nodes | selectattr('role', 'equalto', 'worker') | list | length }}
+controlPlane:
+  name: master
+  replicas: {{ nodes | selectattr('role', 'equalto', 'master') | list | length }}
+{% endif %}
+
+networking:
+  networkType: OVNKubernetes
+  clusterNetwork:
+    - cidr: {{ cluster_network_cidr }}
+      hostPrefix: {{ cluster_network_prefix }}
+  serviceNetwork:
+    - {{ service_network_cidr }}
+  machineNetwork:
+    - cidr: {{ machine_network }}
+
+platform:
+  {{ platform_type }}: {}
+
+{% if fips_enabled | default(false) | bool %}
+fips: true
+{% endif %}
+
+pullSecret: '{{ pull_secret_content }}'
+sshKey: '{{ ssh_public_key_content }}'

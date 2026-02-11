@@ -1,0 +1,49 @@
+# =============================================================================
+# Definicje maszyn wirtualnych dla środowiska virt_env1
+# =============================================================================
+# Playbook create-virt-env.yml tworzy maszyny z tej listy.
+# UWAGA: Istniejące maszyny NIE są modyfikowane — tylko nowe są tworzone.
+#
+# Parametry opcjonalne (jeśli nie podane, użyte zostaną wartości domyślne):
+#   cpu_sockets: 32
+#   memory: 768Gi
+#   disk_size: 250Gi
+#   max_cpu_sockets: 64
+#   max_memory: 1Ti
+# =============================================================================
+
+namespace: proj-vms
+
+# PVC z ISO do instalacji OS (musi istnieć w namespace)
+iso_pvc_name: tools-iso-pvc
+
+# Sieć Multus (namespace/nazwa)
+multus_network: default/vlan214-net
+
+# Domyślne wartości dla maszyn
+defaults:
+  cpu_sockets: 32
+  memory: 768Gi
+  disk_size: 250Gi
+  max_cpu_sockets: 64
+  max_memory: 1Ti
+
+# Lista maszyn do utworzenia
+vms:
+  - name: worker-large-1
+    # używa domyślnych wartości
+
+  - name: worker-large-2
+    # używa domyślnych wartości
+
+  - name: worker-large-3
+    # używa domyślnych wartości
+
+  - name: worker-large-4
+    # używa domyślnych wartości
+
+  # Przykład z nadpisanymi wartościami:
+  # - name: worker-large-5
+  #   cpu_sockets: 16
+  #   memory: 64Gi
+  #   disk_size: 120Gi
