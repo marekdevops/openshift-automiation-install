@@ -6,9 +6,11 @@ metadata:
 
 rendezvousIP: {{ nodes | selectattr('role', 'equalto', 'master') | map(attribute='ip') | first }}
 
-{% if not single_node | default(false) | bool %}
+{% if ntp_servers is defined and ntp_servers | length > 0 %}
 additionalNTPSources:
-  - {{ dns_server }}
+{% for ntp in ntp_servers %}
+  - {{ ntp }}
+{% endfor %}
 {% endif %}
 
 hosts:

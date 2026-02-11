@@ -48,6 +48,10 @@ machine_network: 192.168.214.0/24
 dns_server: 192.168.214.1
 gateway: 192.168.214.1
 
+# NTP servers (lista)
+ntp_servers:
+  - 192.168.214.1
+
 # VIP (wystawiane przez F5 / zewnętrzny LB)
 api_vip: 192.168.214.100
 ingress_vip: 192.168.214.101
