@@ -25,6 +25,9 @@ base_domain: example.com
 # pull_secret_file: ~/.openshift/pull-secret.json
 # ssh_public_key_file: ~/.ssh/id_ed25519.pub
 # install_dir: /tmp/ocp-install/{{ cluster_name }}
+#
+# Air-gapped: lokalne RHCOS ISO (pobierz z mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/)
+# rhcos_iso_path: /tmp/rhcos-live.x86_64.iso
 
 # -----------------------------------------------------------------------------
 # VM - OpenShift Virtualization

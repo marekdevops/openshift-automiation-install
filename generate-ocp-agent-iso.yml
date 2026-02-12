@@ -11,6 +11,10 @@
 #   - klucz SSH
 #   - ansible-galaxy collection install ansible.utils (dla filtrów ipaddr)
 #
+# Opcjonalnie (air-gapped):
+#   - rhcos_iso_path: ścieżka do lokalnego RHCOS ISO (pobierz z mirror.openshift.com)
+#     Przykład: rhcos_iso_path: /tmp/rhcos-live.x86_64.iso
+#
 # Output:
 #   - {{ install_dir }}/agent.x86_64.iso — ISO do bootowania VM
 # =============================================================================
@@ -18,7 +22,7 @@
 - name: Generowanie Agent-Based Installer ISO
   hosts: localhost
   connection: local
-  gather_facts: false
+  gather_facts: true
 
   vars:
     # Domyślne wartości (można nadpisać w pliku klastra)
@@ -137,7 +141,41 @@
         msg: "{{ install_config_preview.stdout_lines }}"
 
     # =========================================================================
-    # Krok 5: Wygeneruj ISO
+    # Krok 5: Przygotuj lokalne RHCOS ISO (air-gapped)
+    # =========================================================================
+    - name: "=== LOKALNE RHCOS ISO (AIR-GAPPED) ==="
+      ansible.builtin.debug:
+        msg: "Używam lokalnego RHCOS ISO: {{ rhcos_iso_path }}"
+      when: rhcos_iso_path is defined
+
+    - name: Sprawdź czy lokalne RHCOS ISO istnieje
+      ansible.builtin.stat:
+        path: "{{ rhcos_iso_path }}"
+      register: rhcos_iso_stat
+      when: rhcos_iso_path is defined
+
+    - name: Błąd — brak lokalnego RHCOS ISO
+      ansible.builtin.fail:
+        msg: "Nie znaleziono RHCOS ISO w {{ rhcos_iso_path }}"
+      when: rhcos_iso_path is defined and not rhcos_iso_stat.stat.exists
+
+    - name: Utwórz katalog cache dla openshift-installer
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.cache/openshift-installer/image_cache"
+        state: directory
+        mode: '0755'
+      when: rhcos_iso_path is defined
+
+    - name: Skopiuj lokalne RHCOS ISO do cache
+      ansible.builtin.copy:
+        src: "{{ rhcos_iso_path }}"
+        dest: "{{ ansible_env.HOME }}/.cache/openshift-installer/image_cache/coreos-x86_64.iso"
+        mode: '0644'
+        remote_src: true
+      when: rhcos_iso_path is defined
+
+    # =========================================================================
+    # Krok 6: Wygeneruj ISO
     # =========================================================================
     - name: "=== GENEROWANIE ISO ==="
       ansible.builtin.debug:
