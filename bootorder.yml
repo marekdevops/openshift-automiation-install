@@ -1,0 +1,183 @@
+---
+# =============================================================================
+# Playbook: Zmiana boot order z CDROM na rootdisk
+# =============================================================================
+# Użycie:
+#   ansible-playbook bootorder.yml -e @clusters/ocp1.yml
+#
+# Co robi:
+#   1. Sprawdza czy CDROM jest na pierwszym miejscu w boot order
+#   2. Jeśli tak — zmienia na rootdisk pierwszy, CDROM drugi
+#   3. Restartuje VM
+#
+# Typowe użycie: po zakończeniu instalacji OCP, żeby bootować z dysku
+# =============================================================================
+
+- name: Zmiana boot order na rootdisk
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Informacja
+    # =========================================================================
+    - name: "=== ZMIANA BOOT ORDER DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}"
+
+    # =========================================================================
+    # Krok 2: Sprawdź aktualny boot order
+    # =========================================================================
+    - name: Pobierz definicje VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_info
+
+    - name: Sprawdź boot order dla każdej VM
+      ansible.builtin.set_fact:
+        vms_with_cdrom_first: >-
+          {{ vms_with_cdrom_first | default([]) + (
+            [item.item.name] if (
+              item.resources | length > 0 and
+              item.resources[0].spec.template.spec.domain.devices.disks | default([]) | selectattr('name', 'equalto', 'cdrom-iso') | list | length > 0 and
+              (item.resources[0].spec.template.spec.domain.devices.disks | selectattr('name', 'equalto', 'cdrom-iso') | first).bootOrder | default(99) == 1
+            ) else []
+          ) }}
+      loop: "{{ vm_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Pokaż VM z CDROM jako pierwszy boot
+      ansible.builtin.debug:
+        msg: "VM z CDROM na pierwszym miejscu: {{ vms_with_cdrom_first | default([]) }}"
+
+    - name: Brak VM do zmiany
+      ansible.builtin.debug:
+        msg: "Wszystkie VM mają już rootdisk jako pierwszy boot. Nic do zmiany."
+      when: vms_with_cdrom_first | default([]) | length == 0
+
+    # =========================================================================
+    # Krok 3: Zatrzymaj VM (tylko te z CDROM first)
+    # =========================================================================
+    - name: "=== ZATRZYMYWANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Zatrzymuję VM przed zmianą boot order..."
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    - name: Zatrzymaj VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Halted
+      loop: "{{ vms_with_cdrom_first | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    - name: Poczekaj na zatrzymanie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_check
+      until: vmi_check.resources | length == 0
+      retries: 30
+      delay: 5
+      loop: "{{ vms_with_cdrom_first | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 4: Zmień boot order (oc patch)
+    # =========================================================================
+    - name: "=== ZMIANA BOOT ORDER ==="
+      ansible.builtin.debug:
+        msg: "Zmieniam boot order: rootdisk=1, cdrom=2..."
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    - name: Zmień boot order (oc patch)
+      ansible.builtin.command:
+        cmd: >
+          oc patch vm {{ item }} -n {{ namespace }} --type=json -p='[
+            {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 2}
+            ]}
+          ]'
+      loop: "{{ vms_with_cdrom_first | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: patch_result
+      changed_when: true
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 5: Uruchom VM
+    # =========================================================================
+    - name: "=== URUCHAMIANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Uruchamiam VM z bootem z rootdisk..."
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    - name: Uruchom VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Always
+      loop: "{{ vms_with_cdrom_first | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    - name: Poczekaj na uruchomienie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ vms_with_cdrom_first | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: vms_with_cdrom_first | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 6: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          Boot order zmieniony pomyślnie!
+
+          VM ze zmienionym boot order: {{ vms_with_cdrom_first | default([]) | join(', ') }}
+          Nowy boot order: 1. rootdisk, 2. cdrom
+
+          Konsola VM:
+            virtctl console {{ nodes[0].name }} -n {{ namespace }}
+      when: vms_with_cdrom_first | default([]) | length > 0
