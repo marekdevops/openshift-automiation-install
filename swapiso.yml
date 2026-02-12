@@ -1,0 +1,191 @@
+---
+# =============================================================================
+# Playbook: Podmiana ISO w CDROM
+# =============================================================================
+# Użycie:
+#   ansible-playbook swapiso.yml -e @clusters/ocp1.yml -e iso_dv_name=nowe-iso-dv
+#
+# Parametry:
+#   - iso_dv_name: nazwa DataVolume/PVC z nowym ISO (wymagane)
+#
+# Co robi:
+#   1. Zatrzymuje VM
+#   2. Podmienia CDROM na nowy DataVolume
+#   3. Uruchamia VM
+# =============================================================================
+
+- name: Podmiana ISO w CDROM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Walidacja
+    # =========================================================================
+    - name: Sprawdź czy iso_dv_name jest podane
+      ansible.builtin.fail:
+        msg: |
+          Brak parametru iso_dv_name!
+          Użycie: ansible-playbook swapiso.yml -e @clusters/ocp1.yml -e iso_dv_name=nazwa-dv
+      when: iso_dv_name is not defined
+
+    - name: "=== PODMIANA ISO DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}, Nowe ISO DV: {{ iso_dv_name }}, Nodes: {{ nodes | length }}"
+
+    # =========================================================================
+    # Krok 2: Sprawdź czy DV/PVC istnieje
+    # =========================================================================
+    - name: Sprawdź czy DataVolume/PVC istnieje
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ namespace }}"
+        name: "{{ iso_dv_name }}"
+      register: iso_pvc_check
+
+    - name: Błąd — DV/PVC nie istnieje
+      ansible.builtin.fail:
+        msg: "Nie znaleziono DataVolume/PVC '{{ iso_dv_name }}' w namespace '{{ namespace }}'"
+      when: iso_pvc_check.resources | length == 0
+
+    # =========================================================================
+    # Krok 3: Zatrzymaj VM
+    # =========================================================================
+    - name: "=== ZATRZYMYWANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Zatrzymuję VM przed podmianą ISO..."
+
+    - name: Zatrzymaj VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Halted
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Poczekaj na zatrzymanie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_check
+      until: vmi_check.resources | length == 0
+      retries: 30
+      delay: 5
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # =========================================================================
+    # Krok 4: Podmień ISO w CDROM
+    # =========================================================================
+    - name: "=== PODMIANA ISO ==="
+      ansible.builtin.debug:
+        msg: "Podmieniam CDROM na {{ iso_dv_name }}..."
+
+    - name: Pobierz aktualną definicję VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: current_vms
+
+    - name: Podmień CDROM volume na nowy DV
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.item.name }}"
+        state: present
+        merge_type: strategic-merge
+        definition:
+          spec:
+            template:
+              spec:
+                domain:
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                        bootOrder: 2
+                      - name: cdrom-iso
+                        cdrom:
+                          bus: sata
+                        bootOrder: 1
+                volumes:
+                  - name: rootdisk
+                    dataVolume:
+                      name: "{{ item.item.name }}-rootdisk"
+                  - name: cdrom-iso
+                    persistentVolumeClaim:
+                      claimName: "{{ iso_dv_name }}"
+      loop: "{{ current_vms.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # =========================================================================
+    # Krok 5: Uruchom VM
+    # =========================================================================
+    - name: "=== URUCHAMIANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Uruchamiam VM z nowym ISO..."
+
+    - name: Uruchom VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Always
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Poczekaj na uruchomienie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # =========================================================================
+    # Krok 6: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          ISO podmienione pomyślnie!
+
+          Nowe ISO: {{ iso_dv_name }}
+          VM uruchomione: {{ nodes | map(attribute='name') | list | join(', ') }}
+
+          Konsola VM:
+            virtctl console {{ nodes[0].name }} -n {{ namespace }}
