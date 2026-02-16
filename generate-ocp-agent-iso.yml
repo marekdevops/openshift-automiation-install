@@ -159,9 +159,9 @@
         msg: "Nie znaleziono RHCOS ISO w {{ rhcos_iso_path }}"
       when: rhcos_iso_path is defined and not rhcos_iso_stat.stat.exists
 
-    - name: Utwórz katalog cache dla openshift-installer
+    - name: Utwórz katalog cache dla agent installer
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.cache/openshift-installer/image_cache"
+        path: "{{ ansible_env.HOME }}/.cache/agent/image_cache"
         state: directory
         mode: '0755'
       when: rhcos_iso_path is defined
@@ -169,7 +169,7 @@
     - name: Skopiuj lokalne RHCOS ISO do cache
       ansible.builtin.copy:
         src: "{{ rhcos_iso_path }}"
-        dest: "{{ ansible_env.HOME }}/.cache/openshift-installer/image_cache/coreos-x86_64.iso"
+        dest: "{{ ansible_env.HOME }}/.cache/agent/image_cache/coreos-x86_64.iso"
         mode: '0644'
         remote_src: true
       when: rhcos_iso_path is defined
