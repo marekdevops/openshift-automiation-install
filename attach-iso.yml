@@ -69,6 +69,7 @@
           --size=2Gi
           --image-path={{ iso_file }}
           -n {{ namespace }}
+          --access-mode=ReadWriteMany
           --insecure
       when: iso_pvc_info.resources | length == 0
       register: upload_result
