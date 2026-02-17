@@ -17,6 +17,8 @@
 
   vars:
     stage: complete
+    openshift_install_binary: /usr/local/bin/openshift-install
+    install_dir: "/tmp/ocp-install/{{ cluster_name }}"
 
   tasks:
     - name: "=== MONITOROWANIE INSTALACJI ==="
