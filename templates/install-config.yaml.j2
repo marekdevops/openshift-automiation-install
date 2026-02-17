@@ -32,19 +32,16 @@ networking:
   machineNetwork:
     - cidr: {{ machine_network }}
 
-{% if single_node | default(false) | bool %}
+{% if external_lb | default(false) | bool %}
+# Zewnętrzny load balancer (F5, HAProxy) - bez VIP, tylko DNS
 platform:
   none: {}
-{% elif external_lb | default(true) | bool %}
+{% elif single_node | default(false) | bool %}
+# Single Node OpenShift
 platform:
-  baremetal:
-    apiVIPs:
-      - {{ api_vip }}
-    ingressVIPs:
-      - {{ ingress_vip }}
-    loadBalancer:
-      type: UserManaged
+  none: {}
 {% else %}
+# Wewnętrzny load balancer (keepalived) - wymaga VIP
 platform:
   baremetal:
     apiVIPs:

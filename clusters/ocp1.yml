@@ -58,9 +58,10 @@ dns_servers:
 ntp_servers:
   - 192.168.214.1
 
-# VIP (wystawiane przez F5 / zewnętrzny LB)
-api_vip: 192.168.214.100
-ingress_vip: 192.168.214.101
+# VIP - tylko gdy external_lb: false (wewnętrzny keepalived)
+# Przy external_lb: true - nie są potrzebne, DNS wskazuje na F5
+# api_vip: 192.168.214.100
+# ingress_vip: 192.168.214.101
 
 # Zewnętrzny load balancer (F5, HAProxy)
 external_lb: true

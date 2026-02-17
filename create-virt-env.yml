@@ -257,9 +257,11 @@
             - {{ ntp }}
           {% endfor %}
 
+          external_lb: {{ external_lb }}
+          {% if not external_lb | default(false) | bool %}
           api_vip: {{ api_vip }}
           ingress_vip: {{ ingress_vip }}
-          external_lb: {{ external_lb }}
+          {% endif %}
 
           cluster_network_cidr: {{ cluster_network_cidr }}
           cluster_network_prefix: {{ cluster_network_prefix }}
