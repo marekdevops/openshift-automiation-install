@@ -126,50 +126,24 @@
       ansible.builtin.debug:
         msg: "Dodaję CDROM z ISO do VM..."
 
-    - name: Pobierz aktualną definicję VM
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        namespace: "{{ namespace }}"
-        name: "{{ item.name }}"
+    - name: Dodaj CDROM disk i volume do VM (oc patch)
+      ansible.builtin.command:
+        cmd: >
+          oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
+            {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 2},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 1}
+            ]},
+            {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
+              {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},
+              {"name": "cdrom-iso", "persistentVolumeClaim": {"claimName": "{{ iso_pvc_name }}"}}
+            ]}
+          ]'
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }}"
-      register: current_vms
-
-    - name: Dodaj CDROM disk i volume do VM
-      kubernetes.core.k8s:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        namespace: "{{ namespace }}"
-        name: "{{ item.item.name }}"
-        state: present
-        merge_type: strategic-merge
-        definition:
-          spec:
-            template:
-              spec:
-                domain:
-                  devices:
-                    disks:
-                      - name: rootdisk
-                        disk:
-                          bus: virtio
-                        bootOrder: 2
-                      - name: cdrom-iso
-                        cdrom:
-                          bus: sata
-                        bootOrder: 1
-                volumes:
-                  - name: rootdisk
-                    dataVolume:
-                      name: "{{ item.item.name }}-rootdisk"
-                  - name: cdrom-iso
-                    persistentVolumeClaim:
-                      claimName: "{{ iso_pvc_name }}"
-      loop: "{{ current_vms.results }}"
-      loop_control:
-        label: "{{ item.item.name }}"
+      register: patch_result
+      changed_when: true
 
     # =========================================================================
     # Krok 5: Uruchom VM
