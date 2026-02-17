@@ -47,42 +47,56 @@
       when: not iso_stat.stat.exists
 
     # =========================================================================
-    # Krok 2: Sprawdź/utwórz PVC dla ISO
+    # Krok 2: Sprawdź/utwórz DataVolume dla ISO
     # =========================================================================
-    - name: Sprawdź czy PVC dla ISO istnieje
+    - name: Sprawdź czy DataVolume dla ISO istnieje
       kubernetes.core.k8s_info:
-        api_version: v1
-        kind: PersistentVolumeClaim
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
         namespace: "{{ namespace }}"
         name: "{{ iso_pvc_name }}"
-      register: iso_pvc_info
+      register: iso_dv_info
 
-    - name: "=== UPLOAD ISO DO PVC ==="
+    - name: "=== UPLOAD ISO DO DATAVOLUME ==="
       ansible.builtin.debug:
-        msg: "Uploaduję {{ iso_file }} do PVC {{ iso_pvc_name }}..."
-      when: iso_pvc_info.resources | length == 0
+        msg: "Uploaduję {{ iso_file }} do DataVolume {{ iso_pvc_name }}..."
+      when: iso_dv_info.resources | length == 0
 
-    - name: Upload ISO do PVC przez virtctl
+    - name: Upload ISO do DataVolume przez virtctl
       ansible.builtin.command:
         cmd: >
-          virtctl image-upload pvc {{ iso_pvc_name }}
+          virtctl image-upload dv {{ iso_pvc_name }}
           --size=2Gi
           --image-path={{ iso_file }}
           -n {{ namespace }}
           --access-mode=ReadWriteMany
           --insecure
-      when: iso_pvc_info.resources | length == 0
+      when: iso_dv_info.resources | length == 0
       register: upload_result
+
+    - name: Poczekaj na zakończenie importu DataVolume
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+      register: dv_status
+      until: >
+        dv_status.resources | length > 0 and
+        dv_status.resources[0].status.phase | default('') == 'Succeeded'
+      retries: 30
+      delay: 10
+      when: iso_dv_info.resources | length == 0
 
     - name: Upload zakończony
       ansible.builtin.debug:
-        msg: "ISO uploadowane do PVC {{ iso_pvc_name }}"
-      when: iso_pvc_info.resources | length == 0
+        msg: "ISO uploadowane do DataVolume {{ iso_pvc_name }}"
+      when: iso_dv_info.resources | length == 0
 
-    - name: PVC już istnieje
+    - name: DataVolume już istnieje
       ansible.builtin.debug:
-        msg: "PVC {{ iso_pvc_name }} już istnieje — pomijam upload"
-      when: iso_pvc_info.resources | length > 0
+        msg: "DataVolume {{ iso_pvc_name }} już istnieje — pomijam upload"
+      when: iso_dv_info.resources | length > 0
 
     # =========================================================================
     # Krok 3: Zatrzymaj VM przed modyfikacją
@@ -137,7 +151,7 @@
             ]},
             {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
               {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},
-              {"name": "cdrom-iso", "persistentVolumeClaim": {"claimName": "{{ iso_pvc_name }}"}}
+              {"name": "cdrom-iso", "dataVolume": {"name": "{{ iso_pvc_name }}"}}
             ]}
           ]'
       loop: "{{ nodes }}"

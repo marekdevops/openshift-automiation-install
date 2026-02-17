@@ -99,7 +99,7 @@
           oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
             {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
               {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},
-              {"name": "cdrom-iso", "persistentVolumeClaim": {"claimName": "{{ iso_dv_name }}"}}
+              {"name": "cdrom-iso", "dataVolume": {"name": "{{ iso_dv_name }}"}}
             ]}
           ]'
       loop: "{{ nodes }}"
