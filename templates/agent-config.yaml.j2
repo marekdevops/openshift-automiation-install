@@ -34,6 +34,8 @@ hosts:
               - ip: {{ node.ip }}
                 prefix-length: {{ machine_network | ansible.utils.ipaddr('prefix') }}
             dhcp: false
+          ipv6:
+            enabled: false
       dns-resolver:
         config:
           server:
