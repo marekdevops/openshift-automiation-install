@@ -144,6 +144,7 @@
       loop_control:
         label: "{{ item.name }}"
       register: all_vmis_info
+      ignore_errors: true
 
     - name: Zbuduj mapę VM → MAC (vlan214)
       ansible.builtin.set_fact:
@@ -155,8 +156,13 @@
           }}
       loop: "{{ all_vmis_info.results }}"
       loop_control:
-        label: "{{ item.item.name }}"
-      when: item.resources | length > 0
+        label: "{{ item.item.name | default('unknown') }}"
+      when:
+        - not (item.failed | default(false))
+        - item.item is defined
+        - item.item.name is defined
+        - item.resources is defined
+        - item.resources | length > 0
 
     # =========================================================================
     # Krok 8: Podsumowanie VM i MAC adresów
@@ -171,6 +177,7 @@
       loop_control:
         label: "{{ item.name }}"
       register: all_vms_info
+      ignore_errors: true
 
     - name: "=== PODSUMOWANIE MASZYN WIRTUALNYCH ==="
       ansible.builtin.debug:
@@ -181,8 +188,11 @@
           MAC(vlan214): {{ vm_mac_map[item.resources[0].metadata.name] | default('brak') }}
       loop: "{{ all_vms_info.results }}"
       loop_control:
-        label: "{{ item.resources[0].metadata.name | default('?') }}"
-      when: item.resources | length > 0
+        label: "{{ (item.resources[0].metadata.name if (item.resources | default([]) | length > 0) else item.item.name | default('unknown')) }}"
+      when:
+        - not (item.failed | default(false))
+        - item.resources is defined
+        - item.resources | length > 0
 
     # =========================================================================
     # Krok 9: Zaktualizuj plik konfiguracyjny z MAC adresami
