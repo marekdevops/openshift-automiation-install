@@ -134,9 +134,9 @@
     # =========================================================================
     # Krok 7: Zbierz MAC adresy ze wszystkich VM
     # =========================================================================
-    - name: Inicjalizuj mapę MAC adresów
+    - name: Przygotuj listę nazw nodów
       ansible.builtin.set_fact:
-        vm_mac_map: {}
+        node_names: "{{ nodes | map(attribute='name') | list }}"
 
     - name: Pobierz wszystkie VMI w namespace
       kubernetes.core.k8s_info:
@@ -145,16 +145,29 @@
         namespace: "{{ namespace }}"
       register: all_vmis
 
-    - name: Zbuduj mapę VM → MAC (vlan214)
+    - name: Debug - pokaż znalezione VMI
+      ansible.builtin.debug:
+        msg: "Znalezione VMI: {{ all_vmis.resources | default([]) | map(attribute='metadata.name') | list }}"
+
+    - name: Inicjalizuj mapę MAC
       ansible.builtin.set_fact:
-        vm_mac_map: >-
-          {{ vm_mac_map | combine({
-            item.metadata.name: (item.status.interfaces | default([]) | selectattr('name', 'equalto', 'vlan214') | first | default({})).mac | default('')
-          }) }}
+        vm_mac_map: {}
+
+    - name: Zbierz MAC dla każdego VMI
+      ansible.builtin.set_fact:
+        vm_mac_map: "{{ vm_mac_map | combine({vmi_name: vmi_mac}) }}"
+      vars:
+        vmi_name: "{{ item.metadata.name }}"
+        vmi_interfaces: "{{ item.status.interfaces | default([]) }}"
+        vlan214_iface: "{{ vmi_interfaces | selectattr('name', 'defined') | selectattr('name', 'equalto', 'vlan214') | list | first | default({}) }}"
+        vmi_mac: "{{ vlan214_iface.mac | default('') }}"
       loop: "{{ all_vmis.resources | default([]) }}"
       loop_control:
-        label: "{{ item.metadata.name }}"
-      when: item.metadata.name in (nodes | map(attribute='name') | list)
+        label: "{{ item.metadata.name | default('unknown') }}"
+      when:
+        - item.metadata is defined
+        - item.metadata.name is defined
+        - item.metadata.name in node_names
 
     # =========================================================================
     # Krok 8: Podsumowanie VM i MAC adresów
