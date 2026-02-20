@@ -1,0 +1,204 @@
+---
+# =============================================================================
+# Playbook: Usunięcie CDROM z VM
+# =============================================================================
+# Użycie:
+#   ansible-playbook remove-cdrom.yml -e @clusters/ocp1.yml
+#
+# Opcje:
+#   -e restart=yes    # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#
+# Co robi:
+#   1. Usuwa cdrom-iso z disks
+#   2. Usuwa cdrom-iso z volumes
+#   3. Ustawia bootOrder: 1 na rootdisk
+#   4. Opcjonalnie restartuje VM
+# =============================================================================
+
+- name: Usunięcie CDROM z VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    restart: false
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Informacja
+    # =========================================================================
+    - name: "=== USUWANIE CDROM DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}, Restart: {{ restart }}"
+
+    # =========================================================================
+    # Krok 2: Sprawdź które VM mają CDROM
+    # =========================================================================
+    - name: Pobierz definicje VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_info
+
+    - name: Znajdź VM z CDROM
+      ansible.builtin.set_fact:
+        vms_with_cdrom: >-
+          {{ vms_with_cdrom | default([]) + (
+            [item.item.name] if (
+              item.resources | length > 0 and
+              item.resources[0].spec.template.spec.domain.devices.disks | default([]) | selectattr('name', 'equalto', 'cdrom-iso') | list | length > 0
+            ) else []
+          ) }}
+      loop: "{{ vm_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Pokaż VM z CDROM
+      ansible.builtin.debug:
+        msg: "VM z CDROM: {{ vms_with_cdrom | default([]) }}"
+
+    - name: Brak VM z CDROM
+      ansible.builtin.debug:
+        msg: "Żadna VM nie ma CDROM. Nic do usunięcia."
+      when: vms_with_cdrom | default([]) | length == 0
+
+    # =========================================================================
+    # Krok 3: Zatrzymaj VM (tylko gdy restart=yes)
+    # =========================================================================
+    - name: "=== ZATRZYMYWANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Zatrzymuję VM przed usunięciem CDROM..."
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Zatrzymaj VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Halted
+      loop: "{{ vms_with_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Poczekaj na zatrzymanie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_check
+      until: vmi_check.resources | length == 0
+      retries: 30
+      delay: 5
+      loop: "{{ vms_with_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    # =========================================================================
+    # Krok 4: Usuń CDROM (oc patch)
+    # =========================================================================
+    - name: "=== USUWANIE CDROM ==="
+      ansible.builtin.debug:
+        msg: "Usuwam CDROM i ustawiam boot na rootdisk..."
+      when: vms_with_cdrom | default([]) | length > 0
+
+    - name: Usuń CDROM - zostaw tylko rootdisk (oc patch)
+      ansible.builtin.command:
+        cmd: >
+          oc patch vm {{ item }} -n {{ namespace }} --type=json -p='[
+            {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1}
+            ]},
+            {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
+              {"name": "rootdisk", "dataVolume": {"name": "{{ item }}-rootdisk"}}
+            ]}
+          ]'
+      loop: "{{ vms_with_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: patch_result
+      changed_when: true
+      when: vms_with_cdrom | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 5: Uruchom VM (tylko gdy restart=yes)
+    # =========================================================================
+    - name: "=== URUCHAMIANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Uruchamiam VM bez CDROM..."
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Uruchom VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Always
+      loop: "{{ vms_with_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Poczekaj na uruchomienie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ vms_with_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_with_cdrom | default([]) | length > 0
+        - restart | bool
+
+    # =========================================================================
+    # Krok 6: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          CDROM usunięty pomyślnie!
+
+          VM z usuniętym CDROM: {{ vms_with_cdrom | default([]) | join(', ') }}
+          Boot order: rootdisk (jedyny dysk)
+          {% if restart | bool %}
+          VM zostały zrestartowane.
+          {% else %}
+          VM NIE zostały zrestartowane - zmiana zadziała przy następnym restarcie.
+          Aby zrestartować: ansible-playbook remove-cdrom.yml -e @clusters/{{ cluster_name }}.yml -e restart=yes
+          {% endif %}
+      when: vms_with_cdrom | default([]) | length > 0
