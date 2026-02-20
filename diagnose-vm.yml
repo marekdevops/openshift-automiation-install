@@ -1,0 +1,151 @@
+---
+# =============================================================================
+# Playbook: Diagnostyka VM
+# =============================================================================
+# Użycie:
+#   ansible-playbook diagnose-vm.yml -e @clusters/ocp1.yml
+#   ansible-playbook diagnose-vm.yml -e @clusters/ocp1.yml -e vm_name=ocp1-master-0
+#
+# Co robi:
+#   - Sprawdza konfigurację disks i volumes
+#   - Weryfikuje spójność między nimi
+#   - Pokazuje status VMI
+#   - Wykrywa typowe problemy
+# =============================================================================
+
+- name: Diagnostyka VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "=== DIAGNOSTYKA VM DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}"
+
+    # =========================================================================
+    # Pobierz informacje o VM
+    # =========================================================================
+    - name: Określ które VM sprawdzić
+      ansible.builtin.set_fact:
+        vms_to_check: "{{ [{'name': vm_name}] if vm_name is defined else nodes }}"
+
+    - name: Pobierz definicje VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ vms_to_check }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_info
+
+    - name: Pobierz status VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ vms_to_check }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vmi_info
+
+    # =========================================================================
+    # Analiza każdej VM
+    # =========================================================================
+    - name: "=== ANALIZA VM ==="
+      ansible.builtin.debug:
+        msg: |
+
+          ============================================================
+          VM: {{ item.item.name }}
+          ============================================================
+          {% if item.resources | length == 0 %}
+          STATUS: VM NIE ISTNIEJE!
+          {% else %}
+          {% set vm = item.resources[0] %}
+          {% set disks = vm.spec.template.spec.domain.devices.disks | default([]) %}
+          {% set volumes = vm.spec.template.spec.volumes | default([]) %}
+          {% set disk_names = disks | map(attribute='name') | list %}
+          {% set volume_names = volumes | map(attribute='name') | list %}
+
+          DISKS ({{ disks | length }}):
+          {% for disk in disks %}
+            - name: {{ disk.name }}
+              type: {{ 'disk' if disk.disk is defined else ('cdrom' if disk.cdrom is defined else 'unknown') }}
+              bus: {{ disk.disk.bus | default(disk.cdrom.bus | default('?')) }}
+              bootOrder: {{ disk.bootOrder | default('not set') }}
+          {% endfor %}
+
+          VOLUMES ({{ volumes | length }}):
+          {% for vol in volumes %}
+            - name: {{ vol.name }}
+              source: {{ 'dataVolume: ' + vol.dataVolume.name if vol.dataVolume is defined else ('persistentVolumeClaim: ' + vol.persistentVolumeClaim.claimName if vol.persistentVolumeClaim is defined else ('containerDisk' if vol.containerDisk is defined else ('cloudInitNoCloud' if vol.cloudInitNoCloud is defined else 'unknown'))) }}
+          {% endfor %}
+
+          SPRAWDZENIE SPÓJNOŚCI:
+          {% set missing_volumes = disk_names | difference(volume_names) %}
+          {% set orphan_volumes = volume_names | difference(disk_names) %}
+          {% if missing_volumes | length > 0 %}
+            ❌ BŁĄD: Dyski bez odpowiadających volumes: {{ missing_volumes | join(', ') }}
+          {% else %}
+            ✓ Wszystkie dyski mają volumes
+          {% endif %}
+          {% if orphan_volumes | length > 0 %}
+            ⚠ UWAGA: Volumes bez dysków: {{ orphan_volumes | join(', ') }}
+          {% else %}
+            ✓ Wszystkie volumes mają dyski
+          {% endif %}
+
+          {% set boot_disks = disks | selectattr('bootOrder', 'defined') | list %}
+          {% if boot_disks | length == 0 %}
+            ❌ BŁĄD: Brak bootOrder na żadnym dysku!
+          {% else %}
+            ✓ Boot order ustawiony na {{ boot_disks | length }} dyskach
+          {% endif %}
+
+          {% endif %}
+      loop: "{{ vm_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: "=== STATUS VMI ==="
+      ansible.builtin.debug:
+        msg: |
+
+          VM: {{ item.item.name }}
+          {% if item.resources | length == 0 %}
+          VMI: nie uruchomiona
+          {% else %}
+          {% set vmi = item.resources[0] %}
+          VMI Phase: {{ vmi.status.phase | default('unknown') }}
+          Node: {{ vmi.status.nodeName | default('not scheduled') }}
+          {% if vmi.status.interfaces is defined %}
+          Interfaces:
+          {% for iface in vmi.status.interfaces %}
+            - {{ iface.name }}: {{ iface.ipAddress | default('no IP') }} (MAC: {{ iface.mac | default('?') }})
+          {% endfor %}
+          {% endif %}
+          {% endif %}
+      loop: "{{ vmi_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # =========================================================================
+    # Szczegółowy YAML dla problematycznych VM
+    # =========================================================================
+    - name: "=== RAW SPEC (dla debugowania) ==="
+      ansible.builtin.debug:
+        msg: |
+
+          VM: {{ item.item.name }}
+
+          disks: {{ item.resources[0].spec.template.spec.domain.devices.disks | default([]) | to_nice_yaml }}
+
+          volumes: {{ item.resources[0].spec.template.spec.volumes | default([]) | to_nice_yaml }}
+      loop: "{{ vm_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.resources | length > 0
