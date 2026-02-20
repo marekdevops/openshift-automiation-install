@@ -6,13 +6,16 @@
 #   ansible-playbook remove-cdrom.yml -e @clusters/ocp1.yml
 #
 # Opcje:
-#   -e restart=yes    # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#   -e restart=yes           # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#   -e target_role=worker    # tylko nody o danej roli (master/worker/infra)
+#   -e "target_nodes=['vm1','vm2']"  # tylko konkretne VM (lista nazw)
 #
 # Co robi:
-#   1. Usuwa cdrom-iso z disks
-#   2. Usuwa cdrom-iso z volumes
-#   3. Ustawia bootOrder: 1 na rootdisk
-#   4. Opcjonalnie restartuje VM
+#   1. Filtruje nody według target_role lub target_nodes (jeśli podano)
+#   2. Usuwa cdrom-iso z disks
+#   3. Usuwa cdrom-iso z volumes
+#   4. Ustawia bootOrder: 1 na rootdisk
+#   5. Opcjonalnie restartuje VM
 # =============================================================================
 
 - name: Usunięcie CDROM z VM
@@ -22,14 +25,38 @@
 
   vars:
     restart: false
+    target_role: ""
+    target_nodes: []
 
   tasks:
     # =========================================================================
-    # Krok 1: Informacja
+    # Krok 1: Filtrowanie nodów
     # =========================================================================
+    - name: Filtruj nody według target_role
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes | selectattr('role', 'equalto', target_role) | list }}"
+      when: target_role | length > 0
+
+    - name: Filtruj nody według target_nodes
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes | selectattr('name', 'in', target_nodes) | list }}"
+      when:
+        - target_role | length == 0
+        - target_nodes | length > 0
+
+    - name: Użyj wszystkich nodów (brak filtra)
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes }}"
+      when:
+        - target_role | length == 0
+        - target_nodes | length == 0
+
     - name: "=== USUWANIE CDROM DLA KLASTRA {{ cluster_name }} ==="
       ansible.builtin.debug:
-        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}, Restart: {{ restart }}"
+        msg: |
+          Namespace: {{ namespace }}, Restart: {{ restart }}
+          {% if target_role | length > 0 %}Filtr: role={{ target_role }}{% elif target_nodes | length > 0 %}Filtr: {{ target_nodes }}{% else %}Filtr: wszystkie{% endif %}
+          Nody ({{ filtered_nodes | length }}): {{ filtered_nodes | map(attribute='name') | list }}
 
     # =========================================================================
     # Krok 2: Sprawdź które VM mają CDROM
@@ -40,7 +67,7 @@
         kind: VirtualMachine
         namespace: "{{ namespace }}"
         name: "{{ item.name }}"
-      loop: "{{ nodes }}"
+      loop: "{{ filtered_nodes }}"
       loop_control:
         label: "{{ item.name }}"
       register: vm_info
