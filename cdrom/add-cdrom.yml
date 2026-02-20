@@ -7,14 +7,24 @@
 #   ansible-playbook add-cdrom.yml -e @clusters/ocp1.yml -e iso_dv_name=custom-iso
 #
 # Opcje:
-#   -e restart=yes       # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
-#   -e iso_dv_name=xxx   # nazwa DataVolume z ISO (domyślnie: iso_pvc_name z configu)
+#   -e restart=yes           # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#   -e iso_dv_name=xxx       # nazwa DataVolume z ISO (domyślnie: iso_pvc_name z configu)
+#   -e target_role=worker    # tylko nody o danej roli (master/worker/infra)
+#   -e "target_nodes=['vm1','vm2']"  # tylko konkretne VM (lista nazw)
+#
+# Przykłady:
+#   # Tylko workery
+#   ansible-playbook cdrom/add-cdrom.yml -e @clusters/ocp1.yml -e target_role=worker
+#
+#   # Tylko konkretne VM
+#   ansible-playbook cdrom/add-cdrom.yml -e @clusters/ocp1.yml -e "target_nodes=['ocp1-worker-0']"
 #
 # Co robi:
-#   1. Sprawdza czy VM ma CDROM
-#   2. Jeśli nie ma — dodaje cdrom-iso
-#   3. Ustawia bootOrder: CDROM=1, rootdisk=2
-#   4. Opcjonalnie restartuje VM
+#   1. Filtruje nody według target_role lub target_nodes (jeśli podano)
+#   2. Sprawdza czy VM ma CDROM
+#   3. Jeśli nie ma — dodaje cdrom-iso
+#   4. Ustawia bootOrder: CDROM=1, rootdisk=2
+#   5. Opcjonalnie restartuje VM
 # =============================================================================
 
 - name: Dodanie CDROM do VM
@@ -24,18 +34,50 @@
 
   vars:
     restart: false
+    target_role: ""
+    target_nodes: []
 
   tasks:
     # =========================================================================
-    # Krok 1: Informacja
+    # Krok 1: Filtrowanie nodów
     # =========================================================================
+    - name: Filtruj nody według target_role
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes | selectattr('role', 'equalto', target_role) | list }}"
+      when: target_role | length > 0
+
+    - name: Filtruj nody według target_nodes
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes | selectattr('name', 'in', target_nodes) | list }}"
+      when:
+        - target_role | length == 0
+        - target_nodes | length > 0
+
+    - name: Użyj wszystkich nodów (brak filtra)
+      ansible.builtin.set_fact:
+        filtered_nodes: "{{ nodes }}"
+      when:
+        - target_role | length == 0
+        - target_nodes | length == 0
+
     - name: Ustaw nazwę ISO DV
       ansible.builtin.set_fact:
         iso_dv: "{{ iso_dv_name | default(iso_pvc_name) }}"
 
     - name: "=== DODAWANIE CDROM DLA KLASTRA {{ cluster_name }} ==="
       ansible.builtin.debug:
-        msg: "Namespace: {{ namespace }}, ISO DV: {{ iso_dv }}, Nodes: {{ nodes | length }}, Restart: {{ restart }}"
+        msg: |
+          Namespace: {{ namespace }}
+          ISO DV: {{ iso_dv }}
+          Restart: {{ restart }}
+          {% if target_role | length > 0 %}
+          Filtr: role={{ target_role }}
+          {% elif target_nodes | length > 0 %}
+          Filtr: target_nodes={{ target_nodes }}
+          {% else %}
+          Filtr: wszystkie nody
+          {% endif %}
+          Nody do przetworzenia ({{ filtered_nodes | length }}): {{ filtered_nodes | map(attribute='name') | list }}
 
     # =========================================================================
     # Krok 2: Sprawdź czy ISO DV istnieje
@@ -75,7 +117,7 @@
         kind: VirtualMachine
         namespace: "{{ namespace }}"
         name: "{{ item.name }}"
-      loop: "{{ nodes }}"
+      loop: "{{ filtered_nodes }}"
       loop_control:
         label: "{{ item.name }}"
       register: vm_info
