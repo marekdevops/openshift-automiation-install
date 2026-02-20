@@ -65,7 +65,7 @@ Output: `/tmp/ocp-install/<cluster>/agent.x86_64.iso`
 ### 5. Attach ISO and Restart VMs
 
 ```bash
-ansible-playbook attach-iso.yml -e @clusters/mycluster.yml
+ansible-playbook cdrom/attach-iso.yml -e @clusters/mycluster.yml
 ```
 
 This will:
@@ -77,7 +77,7 @@ This will:
 ### 6. Change Boot Order (during installation)
 
 ```bash
-ansible-playbook bootorder.yml -e @clusters/mycluster.yml
+ansible-playbook cdrom/bootorder.yml -e @clusters/mycluster.yml
 ```
 
 Changes boot order to rootdisk without restarting VMs. The change takes effect when nodes restart during OCP installation.
@@ -95,30 +95,49 @@ openshift-install agent wait-for install-complete --dir=/tmp/ocp-install/<cluste
 
 ## Playbooks
 
+### Core Playbooks
+
 | Playbook | Description |
 |----------|-------------|
 | `create-virt-env.yml` | Creates VMs (no CDROM), starts, saves MAC addresses |
 | `delete-virt-env.yml` | Deletes VMs (dry-run by default, use `-e remove=yes`) |
 | `generate-ocp-agent-iso.yml` | Generates Agent-Based Installer ISO |
-| `attach-iso.yml` | Uploads ISO to DataVolume, attaches CDROM, restarts VMs |
-| `swapiso.yml` | Swaps ISO in CDROM to different DataVolume |
-| `bootorder.yml` | Changes boot order from CDROM to rootdisk |
 | `wait-ocp-install.yml` | Monitors installation progress |
+| `diagnose-vm.yml` | Diagnoses VM configuration issues |
+
+### CDROM Management (`cdrom/`)
+
+| Playbook | Description |
+|----------|-------------|
+| `cdrom/attach-iso.yml` | Uploads ISO to DataVolume, attaches CDROM, restarts VMs |
+| `cdrom/add-cdrom.yml` | Adds CDROM to VMs that don't have it |
+| `cdrom/remove-cdrom.yml` | Removes CDROM from VMs |
+| `cdrom/swapiso.yml` | Swaps ISO in CDROM to different DataVolume |
+| `cdrom/bootorder.yml` | Changes boot order (CDROM ↔ rootdisk) |
 
 ### Playbook Options
 
-**bootorder.yml:**
+**cdrom/bootorder.yml:**
 ```bash
 # Default: change boot order without restart
-ansible-playbook bootorder.yml -e @clusters/mycluster.yml
+ansible-playbook cdrom/bootorder.yml -e @clusters/mycluster.yml
 
 # With restart
-ansible-playbook bootorder.yml -e @clusters/mycluster.yml -e restart=yes
+ansible-playbook cdrom/bootorder.yml -e @clusters/mycluster.yml -e restart=yes
 ```
 
-**swapiso.yml:**
+**cdrom/add-cdrom.yml:**
 ```bash
-ansible-playbook swapiso.yml -e @clusters/mycluster.yml -e iso_dv_name=new-iso-dv
+# Add CDROM using iso_pvc_name from config
+ansible-playbook cdrom/add-cdrom.yml -e @clusters/mycluster.yml
+
+# Add CDROM with custom DataVolume
+ansible-playbook cdrom/add-cdrom.yml -e @clusters/mycluster.yml -e iso_dv_name=custom-iso
+```
+
+**cdrom/swapiso.yml:**
+```bash
+ansible-playbook cdrom/swapiso.yml -e @clusters/mycluster.yml -e iso_dv_name=new-iso-dv
 ```
 
 **wait-ocp-install.yml:**
