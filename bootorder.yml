@@ -5,12 +5,18 @@
 # Użycie:
 #   ansible-playbook bootorder.yml -e @clusters/ocp1.yml
 #
+# Opcje:
+#   -e restart=yes    # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#
 # Co robi:
 #   1. Sprawdza czy CDROM jest na pierwszym miejscu w boot order
 #   2. Jeśli tak — zmienia na rootdisk pierwszy, CDROM drugi
-#   3. Restartuje VM
+#   3. Domyślnie NIE restartuje VM (zmiana zadziała przy następnym restarcie)
+#   4. Z restart=yes — zatrzymuje i uruchamia VM
 #
-# Typowe użycie: po zakończeniu instalacji OCP, żeby bootować z dysku
+# Typowe użycie:
+#   - W trakcie instalacji OCP: bez restart (node sam się zrestartuje)
+#   - Po instalacji: z -e restart=yes
 # =============================================================================
 
 - name: Zmiana boot order na rootdisk
@@ -18,13 +24,16 @@
   connection: local
   gather_facts: false
 
+  vars:
+    restart: false
+
   tasks:
     # =========================================================================
     # Krok 1: Informacja
     # =========================================================================
     - name: "=== ZMIANA BOOT ORDER DLA KLASTRA {{ cluster_name }} ==="
       ansible.builtin.debug:
-        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}"
+        msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}, Restart: {{ restart }}"
 
     # =========================================================================
     # Krok 2: Sprawdź aktualny boot order
@@ -64,12 +73,14 @@
       when: vms_with_cdrom_first | default([]) | length == 0
 
     # =========================================================================
-    # Krok 3: Zatrzymaj VM (tylko te z CDROM first)
+    # Krok 3: Zatrzymaj VM (tylko gdy restart=yes)
     # =========================================================================
     - name: "=== ZATRZYMYWANIE VM ==="
       ansible.builtin.debug:
         msg: "Zatrzymuję VM przed zmianą boot order..."
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     - name: Zatrzymaj VM
       kubernetes.core.k8s:
@@ -85,7 +96,9 @@
       loop: "{{ vms_with_cdrom_first | default([]) }}"
       loop_control:
         label: "{{ item }}"
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     - name: Poczekaj na zatrzymanie VMI
       kubernetes.core.k8s_info:
@@ -100,7 +113,9 @@
       loop: "{{ vms_with_cdrom_first | default([]) }}"
       loop_control:
         label: "{{ item }}"
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     # =========================================================================
     # Krok 4: Zmień boot order (oc patch)
@@ -127,12 +142,14 @@
       when: vms_with_cdrom_first | default([]) | length > 0
 
     # =========================================================================
-    # Krok 5: Uruchom VM
+    # Krok 5: Uruchom VM (tylko gdy restart=yes)
     # =========================================================================
     - name: "=== URUCHAMIANIE VM ==="
       ansible.builtin.debug:
         msg: "Uruchamiam VM z bootem z rootdisk..."
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     - name: Uruchom VM
       kubernetes.core.k8s:
@@ -148,7 +165,9 @@
       loop: "{{ vms_with_cdrom_first | default([]) }}"
       loop_control:
         label: "{{ item }}"
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     - name: Poczekaj na uruchomienie VMI
       kubernetes.core.k8s_info:
@@ -165,7 +184,9 @@
       loop: "{{ vms_with_cdrom_first | default([]) }}"
       loop_control:
         label: "{{ item }}"
-      when: vms_with_cdrom_first | default([]) | length > 0
+      when:
+        - vms_with_cdrom_first | default([]) | length > 0
+        - restart | bool
 
     # =========================================================================
     # Krok 6: Podsumowanie
@@ -177,7 +198,10 @@
 
           VM ze zmienionym boot order: {{ vms_with_cdrom_first | default([]) | join(', ') }}
           Nowy boot order: 1. rootdisk, 2. cdrom
-
-          Konsola VM:
-            virtctl console {{ nodes[0].name }} -n {{ namespace }}
+          {% if restart | bool %}
+          VM zostały zrestartowane.
+          {% else %}
+          VM NIE zostały zrestartowane - zmiana zadziała przy następnym restarcie.
+          Aby zrestartować teraz: ansible-playbook bootorder.yml -e @clusters/{{ cluster_name }}.yml -e restart=yes
+          {% endif %}
       when: vms_with_cdrom_first | default([]) | length > 0
