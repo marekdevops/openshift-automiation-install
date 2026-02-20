@@ -134,65 +134,53 @@
     # =========================================================================
     # Krok 7: Zbierz MAC adresy ze wszystkich VM
     # =========================================================================
-    - name: Pobierz informacje o VMI dla wszystkich nodów
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ namespace }}"
-        name: "{{ item.name }}"
+    - name: Inicjalizuj mapę MAC adresów
+      ansible.builtin.set_fact:
+        vm_mac_map: {}
+
+    - name: Pobierz MAC dla każdego noda
+      block:
+        - name: Pobierz VMI {{ node_item.name }}
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstance
+            namespace: "{{ namespace }}"
+            name: "{{ node_item.name }}"
+          register: vmi_result
+
+        - name: Zapisz MAC dla {{ node_item.name }}
+          ansible.builtin.set_fact:
+            vm_mac_map: >-
+              {{ vm_mac_map | combine({
+                node_item.name: (vmi_result.resources[0].status.interfaces | default([]) | selectattr('name', 'equalto', 'vlan214') | first | default({})).mac | default('')
+              }) }}
+          when: vmi_result.resources | length > 0
       loop: "{{ nodes }}"
       loop_control:
-        label: "{{ item.name }}"
-      register: all_vmis_info
+        loop_var: node_item
+        label: "{{ node_item.name }}"
       ignore_errors: true
-
-    - name: Zbuduj mapę VM → MAC (vlan214)
-      ansible.builtin.set_fact:
-        vm_mac_map: >-
-          {{
-            vm_mac_map | default({}) | combine({
-              item.item.name: (item.resources[0].status.interfaces | default([]) | selectattr('name', 'equalto', 'vlan214') | first | default({})).mac | default('')
-            })
-          }}
-      loop: "{{ all_vmis_info.results }}"
-      loop_control:
-        label: "{{ item.item.name | default('unknown') }}"
-      when:
-        - not (item.failed | default(false))
-        - item.item is defined
-        - item.item.name is defined
-        - item.resources is defined
-        - item.resources | length > 0
 
     # =========================================================================
     # Krok 8: Podsumowanie VM i MAC adresów
     # =========================================================================
-    - name: Pobierz informacje o wszystkich VM (spec)
+    - name: Pobierz informacje o wszystkich VM
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachine
         namespace: "{{ namespace }}"
-        name: "{{ item.name }}"
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: all_vms_info
-      ignore_errors: true
+      register: all_vms_in_namespace
 
     - name: "=== PODSUMOWANIE MASZYN WIRTUALNYCH ==="
       ansible.builtin.debug:
         msg: >-
-          {{ item.resources[0].metadata.name }} |
-          CPU: {{ item.resources[0].spec.template.spec.domain.cpu.sockets | default('?') }} |
-          RAM: {{ item.resources[0].spec.template.spec.domain.memory.guest | default('?') }} |
-          MAC(vlan214): {{ vm_mac_map[item.resources[0].metadata.name] | default('brak') }}
-      loop: "{{ all_vms_info.results }}"
+          {{ item.metadata.name }} |
+          CPU: {{ item.spec.template.spec.domain.cpu.sockets | default('?') }} |
+          RAM: {{ item.spec.template.spec.domain.memory.guest | default('?') }} |
+          MAC(vlan214): {{ vm_mac_map[item.metadata.name] | default('brak') }}
+      loop: "{{ all_vms_in_namespace.resources | selectattr('metadata.name', 'in', nodes | map(attribute='name') | list) | list }}"
       loop_control:
-        label: "{{ (item.resources[0].metadata.name if (item.resources | default([]) | length > 0) else item.item.name | default('unknown')) }}"
-      when:
-        - not (item.failed | default(false))
-        - item.resources is defined
-        - item.resources | length > 0
+        label: "{{ item.metadata.name }}"
 
     # =========================================================================
     # Krok 9: Zaktualizuj plik konfiguracyjny z MAC adresami
