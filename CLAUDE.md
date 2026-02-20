@@ -4,61 +4,130 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ansible automation for deploying OpenShift clusters on OpenShift Virtualization (KubeVirt) using Agent-Based Installer. The project creates VMs, generates installation ISOs, and monitors cluster deployment.
+Ansible automation for deploying OpenShift clusters on OpenShift Virtualization (KubeVirt) using Agent-Based Installer. The project creates VMs, generates installation ISOs, manages CDROM lifecycle, and monitors cluster deployment.
+
+## Project Structure
+
+```
+openshift-automation-install/
+├── clusters/                       # Cluster configurations
+│   └── ocp1.yml
+├── templates/                      # Jinja2 templates
+│   ├── agent-config.yaml.j2        # Agent config (MAC→IP mapping)
+│   ├── install-config.yaml.j2      # OCP install config
+│   └── vm-worker-large.yaml.j2     # VM template
+├── cdrom/                          # CDROM management playbooks
+│   ├── add-cdrom.yml
+│   ├── attach-iso.yml
+│   ├── bootorder.yml
+│   ├── remove-cdrom.yml
+│   └── swapiso.yml
+├── create-virt-env.yml             # Create VMs
+├── delete-virt-env.yml             # Delete VMs
+├── generate-ocp-agent-iso.yml      # Generate ISO
+├── wait-ocp-install.yml            # Monitor installation
+├── diagnose-vm.yml                 # VM diagnostics
+└── README.md
+```
 
 ## Running Playbooks
 
 All playbooks use cluster configuration from `clusters/<name>.yml`:
 
 ```bash
+# === Core Workflow ===
+
 # Create VMs (auto-saves MAC addresses to config file)
 ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml
-
-# Delete VMs (dry-run by default)
-ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml
-# Actually delete:
-ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml -e remove=yes
 
 # Generate Agent-Based Installer ISO
 ansible-playbook generate-ocp-agent-iso.yml -e @clusters/ocp1.yml
 
+# Attach ISO and start VMs
+ansible-playbook cdrom/attach-iso.yml -e @clusters/ocp1.yml
+
+# Change boot order to rootdisk (without restart - takes effect on next reboot)
+ansible-playbook cdrom/bootorder.yml -e @clusters/ocp1.yml
+
 # Monitor installation
 ansible-playbook wait-ocp-install.yml -e @clusters/ocp1.yml
+
+# === CDROM Management ===
+
+# Add CDROM to VMs without it
+ansible-playbook cdrom/add-cdrom.yml -e @clusters/ocp1.yml
+
+# Remove CDROM from VMs
+ansible-playbook cdrom/remove-cdrom.yml -e @clusters/ocp1.yml
+
+# Swap ISO to different DataVolume
+ansible-playbook cdrom/swapiso.yml -e @clusters/ocp1.yml -e iso_dv_name=new-iso
+
+# === Utilities ===
+
+# Diagnose VM configuration issues
+ansible-playbook diagnose-vm.yml -e @clusters/ocp1.yml
+
+# Delete VMs (dry-run by default, use -e remove=yes to actually delete)
+ansible-playbook delete-virt-env.yml -e @clusters/ocp1.yml -e remove=yes
 ```
 
-## Architecture
+## Key Configuration Options
 
-**Configuration:**
-- `clusters/<name>.yml` — Single source of truth for each cluster (VM specs, network, nodes with MAC/IP)
-- MAC addresses are auto-populated by `create-virt-env.yml`
+**Cluster config (`clusters/<name>.yml`):**
 
-**VM Management:**
-- `create-virt-env.yml` — Creates VMs, waits for them to start, saves MAC addresses to config
-- `delete-virt-env.yml` — Removes VMs defined in config (dry-run protection)
-- `templates/vm-worker-large.yaml.j2` — Jinja2 template for VMs
+```yaml
+cluster_name: ocp1
+base_domain: example.com
+namespace: proj-vms
 
-**OpenShift Installation:**
-- `generate-ocp-agent-iso.yml` — Generates `install-config.yaml`, `agent-config.yaml`, and bootable ISO
-- `wait-ocp-install.yml` — Waits for bootstrap and installation completion
-- `templates/install-config.yaml.j2` — OpenShift cluster configuration
-- `templates/agent-config.yaml.j2` — Static network config per host (MAC → IP mapping)
+# External LB (F5/HAProxy) - no VIPs needed, uses platform: none
+external_lb: true
+
+# Internal LB (keepalived) - requires VIPs
+# external_lb: false
+# api_vip: 192.168.214.100
+# ingress_vip: 192.168.214.101
+
+# DNS and NTP as lists
+dns_servers:
+  - 192.168.214.1
+ntp_servers:
+  - 192.168.214.1
+
+# Air-gapped: local RHCOS ISO
+# rhcos_iso_path: /path/to/rhcos-live.x86_64.iso
+```
+
+**Playbook options:**
+
+- `restart=yes` — For cdrom playbooks, restart VMs after changes (default: no)
+- `iso_dv_name=xxx` — Custom DataVolume name for ISO
+- `stage=bootstrap|complete` — For wait-ocp-install.yml
+- `remove=yes` — For delete-virt-env.yml, actually delete VMs
 
 ## Key Features
 
 - **IaC approach**: Single config file per cluster in `clusters/`
 - **Auto MAC population**: `create-virt-env.yml` saves MAC addresses back to config
-- **External LB support**: `external_lb: true` uses `loadBalancer.type: UserManaged` for F5/HAProxy
-- **Protection**: `delete-virt-env.yml` requires `-e remove=yes` to actually delete
-- **Idempotent**: `create-virt-env.yml` skips existing VMs
+- **External LB support**: `external_lb: true` uses `platform: none` (no VIPs required)
+- **Air-gapped support**: `rhcos_iso_path` for local RHCOS ISO
+- **DataVolume for ISO**: Uses DataVolume (not PVC) with ReadWriteMany for live migration
+- **IPv4 only**: IPv6 explicitly disabled in network config
+- **Protection**: `delete-virt-env.yml` requires `-e remove=yes` to delete
+- **Idempotent**: Playbooks skip existing resources
 
 ## Key Dependencies
 
 - Ansible collections: `kubernetes.core`, `kubevirt.core`, `ansible.utils`
+- `oc` CLI logged in to cluster
+- `virtctl` for VM console access
 - `openshift-install` binary for ISO generation
 - Pull secret from console.redhat.com
 
 ## Conventions
 
-- Playbooks use active OpenShift context (no kubeconfig path needed)
-- VMs are labeled `managed-by=ansible` for tracking
-- Network: pod network (masquerade) + Multus VLAN bridge (vlan214)
+- Playbooks use active OpenShift context (oc login)
+- VMs use: host-passthrough CPU, hotplug CPU/RAM, dual NIC (pod + Multus VLAN)
+- ISO stored as DataVolume with ReadWriteMany access mode
+- Comments in playbooks are in Polish
