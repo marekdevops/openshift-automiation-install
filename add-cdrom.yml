@@ -1,0 +1,242 @@
+---
+# =============================================================================
+# Playbook: Dodanie CDROM do VM
+# =============================================================================
+# Użycie:
+#   ansible-playbook add-cdrom.yml -e @clusters/ocp1.yml
+#   ansible-playbook add-cdrom.yml -e @clusters/ocp1.yml -e iso_dv_name=custom-iso
+#
+# Opcje:
+#   -e restart=yes       # zatrzymaj i uruchom VM po zmianie (domyślnie: nie)
+#   -e iso_dv_name=xxx   # nazwa DataVolume z ISO (domyślnie: iso_pvc_name z configu)
+#
+# Co robi:
+#   1. Sprawdza czy VM ma CDROM
+#   2. Jeśli nie ma — dodaje cdrom-iso
+#   3. Ustawia bootOrder: CDROM=1, rootdisk=2
+#   4. Opcjonalnie restartuje VM
+# =============================================================================
+
+- name: Dodanie CDROM do VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    restart: false
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Informacja
+    # =========================================================================
+    - name: Ustaw nazwę ISO DV
+      ansible.builtin.set_fact:
+        iso_dv: "{{ iso_dv_name | default(iso_pvc_name) }}"
+
+    - name: "=== DODAWANIE CDROM DLA KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }}, ISO DV: {{ iso_dv }}, Nodes: {{ nodes | length }}, Restart: {{ restart }}"
+
+    # =========================================================================
+    # Krok 2: Sprawdź czy ISO DV istnieje
+    # =========================================================================
+    - name: Sprawdź czy DataVolume z ISO istnieje
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_dv }}"
+      register: iso_dv_info
+
+    - name: Sprawdź czy PVC z ISO istnieje (fallback)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ namespace }}"
+        name: "{{ iso_dv }}"
+      register: iso_pvc_info
+      when: iso_dv_info.resources | length == 0
+
+    - name: Błąd — brak ISO
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono DataVolume/PVC '{{ iso_dv }}' w namespace '{{ namespace }}'.
+          Najpierw wgraj ISO: ansible-playbook attach-iso.yml -e @clusters/{{ cluster_name }}.yml
+      when:
+        - iso_dv_info.resources | length == 0
+        - iso_pvc_info.resources | default([]) | length == 0
+
+    # =========================================================================
+    # Krok 3: Sprawdź które VM nie mają CDROM
+    # =========================================================================
+    - name: Pobierz definicje VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_info
+
+    - name: Znajdź VM bez CDROM
+      ansible.builtin.set_fact:
+        vms_without_cdrom: >-
+          {{ vms_without_cdrom | default([]) + (
+            [item.item.name] if (
+              item.resources | length > 0 and
+              item.resources[0].spec.template.spec.domain.devices.disks | default([]) | selectattr('name', 'equalto', 'cdrom-iso') | list | length == 0
+            ) else []
+          ) }}
+      loop: "{{ vm_info.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Pokaż VM bez CDROM
+      ansible.builtin.debug:
+        msg: "VM bez CDROM (do dodania): {{ vms_without_cdrom | default([]) }}"
+
+    - name: Wszystkie VM mają CDROM
+      ansible.builtin.debug:
+        msg: "Wszystkie VM mają już CDROM. Nic do dodania."
+      when: vms_without_cdrom | default([]) | length == 0
+
+    # =========================================================================
+    # Krok 4: Zatrzymaj VM (tylko gdy restart=yes)
+    # =========================================================================
+    - name: "=== ZATRZYMYWANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Zatrzymuję VM przed dodaniem CDROM..."
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Zatrzymaj VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Halted
+      loop: "{{ vms_without_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Poczekaj na zatrzymanie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_check
+      until: vmi_check.resources | length == 0
+      retries: 30
+      delay: 5
+      loop: "{{ vms_without_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    # =========================================================================
+    # Krok 5: Dodaj CDROM (oc patch)
+    # =========================================================================
+    - name: "=== DODAWANIE CDROM ==="
+      ansible.builtin.debug:
+        msg: "Dodaję CDROM ({{ iso_dv }}) z bootOrder: 1..."
+      when: vms_without_cdrom | default([]) | length > 0
+
+    - name: Dodaj CDROM do VM (oc patch)
+      ansible.builtin.command:
+        cmd: >
+          oc patch vm {{ item }} -n {{ namespace }} --type=json -p='[
+            {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 2},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 1}
+            ]},
+            {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
+              {"name": "rootdisk", "dataVolume": {"name": "{{ item }}-rootdisk"}},
+              {"name": "cdrom-iso", "dataVolume": {"name": "{{ iso_dv }}"}}
+            ]}
+          ]'
+      loop: "{{ vms_without_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: patch_result
+      changed_when: true
+      when: vms_without_cdrom | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 6: Uruchom VM (tylko gdy restart=yes)
+    # =========================================================================
+    - name: "=== URUCHAMIANIE VM ==="
+      ansible.builtin.debug:
+        msg: "Uruchamiam VM z CDROM..."
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Uruchom VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Always
+      loop: "{{ vms_without_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    - name: Poczekaj na uruchomienie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ vms_without_cdrom | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - vms_without_cdrom | default([]) | length > 0
+        - restart | bool
+
+    # =========================================================================
+    # Krok 7: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          CDROM dodany pomyślnie!
+
+          VM z dodanym CDROM: {{ vms_without_cdrom | default([]) | join(', ') }}
+          ISO DataVolume: {{ iso_dv }}
+          Boot order: 1. cdrom-iso, 2. rootdisk
+          {% if restart | bool %}
+          VM zostały zrestartowane.
+          {% else %}
+          VM NIE zostały zrestartowane - zmiana zadziała przy następnym restarcie.
+          Aby zrestartować: ansible-playbook add-cdrom.yml -e @clusters/{{ cluster_name }}.yml -e restart=yes
+          {% endif %}
+      when: vms_without_cdrom | default([]) | length > 0
