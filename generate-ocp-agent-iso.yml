@@ -33,6 +33,12 @@
 
   tasks:
     # =========================================================================
+    # Krok 0: Wczytaj wygenerowane MAC adresy (musi być pierwsze)
+    # =========================================================================
+    - name: Wczytaj wygenerowane MAC adresy
+      ansible.builtin.include_tasks: tasks/load-generated-vars.yml
+
+    # =========================================================================
     # Krok 1: Walidacja wymagań
     # =========================================================================
     - name: "=== WALIDACJA WYMAGAŃ ==="
@@ -82,8 +88,8 @@
 
     - name: Podsumowanie nodów
       ansible.builtin.debug:
-        msg: "{{ item.hostname }} | {{ item.role }} | MAC: {{ item.mac }} | IP: {{ item.ip }}"
-      loop: "{{ nodes }}"
+        msg: "{{ item.hostname }} | {{ item.role }} | MAC: {{ item.mac | default('brak') }} | IP: {{ item.ip }}"
+      loop: "{{ nodes_with_macs }}"
       loop_control:
         label: "{{ item.hostname }}"
 
@@ -100,17 +106,11 @@
           Gateway: {{ gateway }}
 
     # =========================================================================
-    # Krok 2b: Wczytaj wygenerowane MAC adresy (z clusters/.generated/)
-    # =========================================================================
-    - name: Wczytaj wygenerowane MAC adresy
-      ansible.builtin.include_tasks: tasks/load-generated-vars.yml
-
-    # =========================================================================
-    # Krok 2c: Walidacja MAC adresów
+    # Krok 2b: Walidacja MAC adresów
     # =========================================================================
     - name: Zbierz węzły z brakującym MAC
       ansible.builtin.set_fact:
-        nodes_missing_mac: "{{ nodes | selectattr('mac', 'equalto', '') | list }}"
+        nodes_missing_mac: "{{ nodes_with_macs | selectattr('mac', 'equalto', '') | list }}"
 
     - name: Błąd — brakujące MAC adresy
       ansible.builtin.fail:

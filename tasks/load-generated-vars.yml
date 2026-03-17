@@ -2,18 +2,13 @@
 # =============================================================================
 # Task: Wczytaj wygenerowane zmienne (MAC adresy) z clusters/.generated/
 # =============================================================================
-# Użycie (z playbooka w katalogu głównym projektu):
-#   - name: Wczytaj wygenerowane MAC adresy
-#     ansible.builtin.include_tasks: tasks/load-generated-vars.yml
-#
-# Użycie (z playbooka w podkatalogu, np. cdrom/):
-#   - name: Wczytaj wygenerowane MAC adresy
-#     ansible.builtin.include_tasks: ../tasks/load-generated-vars.yml
-#
 # Efekt:
-#   - Jeśli clusters/.generated/<cluster_name>.yml istnieje:
-#     → wczytuje node_macs i scala z nodes (nadpisuje puste MAC)
-#   - Jeśli nie istnieje — brak zmian, playbook działa na danych ze źródła
+#   - Tworzy zmienną nodes_with_macs: lista nodes wzbogacona o MAC adresy
+#   - Jeśli .generated/ nie istnieje → nodes_with_macs = nodes (bez MAC)
+#
+# UWAGA: set_fact nie może nadpisać zmiennych z -e (extra vars mają najwyższy
+# priorytet w Ansible). Dlatego tworzymy nodes_with_macs zamiast nadpisywać nodes.
+# Wszędzie gdzie potrzebne MAC-i używaj: nodes_with_macs | default(nodes)
 # =============================================================================
 
 - name: Sprawdź czy wygenerowany plik z MAC adresami istnieje
@@ -26,27 +21,26 @@
     file: "{{ lookup('env', 'PWD') }}/clusters/.generated/{{ cluster_name }}.yml"
   when: _generated_vars_stat.stat.exists
 
-- name: Scala nodes z MAC adresami z wygenerowanego pliku
+- name: Zbuduj nodes_with_macs (nodes + MAC adresy)
   ansible.builtin.set_fact:
-    nodes: >-
+    nodes_with_macs: >-
       {%- set result = [] -%}
       {%- for n in nodes -%}
         {%- set mac = (node_macs | default({}))[n.name] | default(n.mac | default('')) -%}
         {%- set _ = result.append(n | combine({'mac': mac})) -%}
       {%- endfor -%}
       {{ result }}
-  when:
-    - _generated_vars_stat.stat.exists
-    - node_macs is defined
 
 - name: "Info — MAC adresy wczytane z wygenerowanego pliku"
   ansible.builtin.debug:
-    msg: "Wczytano MAC adresy z clusters/.generated/{{ cluster_name }}.yml"
+    msg: >-
+      Wczytano MAC adresy z clusters/.generated/{{ cluster_name }}.yml —
+      nodes_with_macs gotowy ({{ nodes_with_macs | length }} węzłów)
   when: _generated_vars_stat.stat.exists
 
-- name: "Info — brak wygenerowanego pliku"
+- name: "Info — brak wygenerowanego pliku, MAC adresy będą puste"
   ansible.builtin.debug:
     msg: |
-      clusters/.generated/{{ cluster_name }}.yml nie istnieje.
+      UWAGA: clusters/.generated/{{ cluster_name }}.yml nie istnieje.
       Uruchom najpierw: ansible-playbook create-virt-env.yml -e @clusters/{{ cluster_name }}.yml
   when: not _generated_vars_stat.stat.exists

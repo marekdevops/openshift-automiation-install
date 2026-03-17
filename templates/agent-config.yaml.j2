@@ -15,7 +15,7 @@ additionalNTPSources:
 {% endif %}
 
 hosts:
-{% for node in nodes %}
+{% for node in nodes_with_macs %}
   - hostname: {{ node.hostname }}
     role: {{ node.role }}
     interfaces:
