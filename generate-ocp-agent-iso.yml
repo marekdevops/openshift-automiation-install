@@ -100,7 +100,13 @@
           Gateway: {{ gateway }}
 
     # =========================================================================
-    # Krok 2b: Walidacja MAC adresów
+    # Krok 2b: Wczytaj wygenerowane MAC adresy (z clusters/.generated/)
+    # =========================================================================
+    - name: Wczytaj wygenerowane MAC adresy
+      ansible.builtin.include_tasks: tasks/load-generated-vars.yml
+
+    # =========================================================================
+    # Krok 2c: Walidacja MAC adresów
     # =========================================================================
     - name: Zbierz węzły z brakującym MAC
       ansible.builtin.set_fact:

@@ -1,0 +1,9 @@
+# Wygenerowane pliki wynikowe (MAC adresy, runtime state)
+clusters/.generated/
+
+# Katalogi instalacyjne z ISO i kubeconfig
+/tmp/ocp-install/
+
+# Sekret i klucze - nigdy nie commituj
+pull-secret.json
+*.pull-secret

@@ -47,6 +47,12 @@
       when: not iso_stat.stat.exists
 
     # =========================================================================
+    # Krok 1b: Wczytaj wygenerowane zmienne
+    # =========================================================================
+    - name: Wczytaj wygenerowane MAC adresy
+      ansible.builtin.include_tasks: ../tasks/load-generated-vars.yml
+
+    # =========================================================================
     # Krok 2: Sprawdź/utwórz DataVolume dla ISO
     # =========================================================================
     - name: Sprawdź czy DataVolume dla ISO istnieje

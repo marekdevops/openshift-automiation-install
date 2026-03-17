@@ -34,6 +34,12 @@
 
   tasks:
     # =========================================================================
+    # Krok 0: Wczytaj wygenerowane zmienne
+    # =========================================================================
+    - name: Wczytaj wygenerowane zmienne
+      ansible.builtin.include_tasks: ../tasks/load-generated-vars.yml
+
+    # =========================================================================
     # Krok 1: Filtrowanie nodów
     # =========================================================================
     - name: Filtruj nody według target_role

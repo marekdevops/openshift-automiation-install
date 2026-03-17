@@ -18,8 +18,7 @@
   gather_facts: false
 
   vars:
-    # Ścieżka do pliku konfiguracyjnego (przekazana przez -e @clusters/xxx.yml)
-    cluster_config_file: "{{ lookup('env', 'PWD') }}/clusters/{{ cluster_name }}.yml"
+    generated_vars_dir: "{{ lookup('env', 'PWD') }}/clusters/.generated"
 
   tasks:
     # =========================================================================
@@ -191,125 +190,30 @@
         label: "{{ item.metadata.name }}"
 
     # =========================================================================
-    # Krok 9: Zaktualizuj plik konfiguracyjny z MAC adresami
+    # Krok 9: Zapisz MAC adresy do pliku wynikowego (clusters/.generated/)
     # =========================================================================
-    - name: Wczytaj aktualny plik konfiguracyjny
-      ansible.builtin.slurp:
-        src: "{{ cluster_config_file }}"
-      register: config_file_content
+    - name: Utwórz katalog clusters/.generated/
+      ansible.builtin.file:
+        path: "{{ generated_vars_dir }}"
+        state: directory
+        mode: '0755'
 
-    - name: Parsuj YAML
-      ansible.builtin.set_fact:
-        config_data: "{{ config_file_content.content | b64decode | from_yaml }}"
-
-    - name: Inicjalizuj vm_mac_map jeśli pusty
-      ansible.builtin.set_fact:
-        vm_mac_map: "{{ vm_mac_map | default({}) }}"
-
-    - name: Przygotuj zaktualizowaną konfigurację
-      ansible.builtin.set_fact:
-        updated_nodes_list: []
-
-    - name: Buduj listę nodów z MAC
-      ansible.builtin.set_fact:
-        updated_nodes_list: "{{ updated_nodes_list + [item | combine({'mac': vm_mac_map[item.name] | default(item.mac) | default('')})] }}"
-      loop: "{{ config_data.nodes }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Zapisz zaktualizowaną konfigurację
+    - name: Zapisz MAC adresy do pliku wynikowego
       ansible.builtin.copy:
         content: |
           # =============================================================================
-          # Konfiguracja klastra: {{ cluster_name }}
+          # WYGENEROWANE AUTOMATYCZNIE przez create-virt-env.yml
+          # NIE EDYTUJ — plik jest nadpisywany przy każdym uruchomieniu
+          # Źródło: clusters/{{ cluster_name }}.yml
+          # Wygenerowano: {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
           # =============================================================================
-          # UWAGA: MAC adresy zostały uzupełnione automatycznie.
-          # Sprawdź IP adresy przed uruchomieniem generate-ocp-agent-iso.yml
-          # =============================================================================
 
-          # -----------------------------------------------------------------------------
-          # Klaster
-          # -----------------------------------------------------------------------------
-          cluster_name: {{ cluster_name }}
-          base_domain: {{ base_domain }}
-
-          # -----------------------------------------------------------------------------
-          # VM - OpenShift Virtualization
-          # -----------------------------------------------------------------------------
-          namespace: {{ namespace }}
-          iso_pvc_name: {{ iso_pvc_name }}
-          multus_network: {{ multus_network }}
-
-          vm_defaults:
-            cpu_sockets: {{ vm_defaults.cpu_sockets }}
-            memory: {{ vm_defaults.memory }}
-            disk_size: {{ vm_defaults.disk_size }}
-            max_cpu_sockets: {{ vm_defaults.max_cpu_sockets }}
-            max_memory: {{ vm_defaults.max_memory }}
-
-          # -----------------------------------------------------------------------------
-          # Sieć
-          # -----------------------------------------------------------------------------
-          machine_network: {{ machine_network }}
-          gateway: {{ gateway }}
-
-          dns_servers:
-          {% for dns in dns_servers %}
-            - {{ dns }}
+          node_macs:
+          {% for node in nodes %}
+            {{ node.name }}: "{{ vm_mac_map[node.name] | default('') }}"
           {% endfor %}
-
-          ntp_servers:
-          {% for ntp in ntp_servers %}
-            - {{ ntp }}
-          {% endfor %}
-
-          external_lb: {{ external_lb }}
-          {% if not external_lb | default(false) | bool %}
-          api_vip: {{ api_vip }}
-          ingress_vip: {{ ingress_vip }}
-          {% endif %}
-
-          cluster_network_cidr: {{ cluster_network_cidr }}
-          cluster_network_prefix: {{ cluster_network_prefix }}
-          service_network_cidr: {{ service_network_cidr }}
-
-          # -----------------------------------------------------------------------------
-          # Nodes
-          # -----------------------------------------------------------------------------
-          nodes:
-          {% for node in updated_nodes_list %}
-            - name: {{ node.name }}
-              hostname: {{ node.hostname }}
-              role: {{ node.role }}
-              mac: "{{ node.mac }}"
-              ip: {{ node.ip }}
-          {% endfor %}
-
-          # -----------------------------------------------------------------------------
-          # Opcje instalacji
-          # -----------------------------------------------------------------------------
-          single_node: {{ single_node }}
-          fips_enabled: {{ fips_enabled }}
-        dest: "{{ cluster_config_file }}"
+        dest: "{{ generated_vars_dir }}/{{ cluster_name }}.yml"
         mode: '0644'
-
-    - name: "=== PLIK KONFIGURACYJNY ZAKTUALIZOWANY ==="
-      ansible.builtin.debug:
-        msg: |
-          MAC adresy zostały zapisane do: {{ cluster_config_file }}
-
-          Następne kroki:
-          1. Sprawdź/uzupełnij IP adresy i hostname w pliku:
-             {{ cluster_config_file }}
-
-          2. Wygeneruj ISO:
-             ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
-
-          3. Podepnij ISO i zrestartuj VM:
-             ansible-playbook attach-iso.yml -e @clusters/{{ cluster_name }}.yml
-
-          4. Monitoruj instalację:
-             ansible-playbook wait-ocp-install.yml -e @clusters/{{ cluster_name }}.yml
 
     - name: "=== TABELA NODÓW ==="
       ansible.builtin.debug:
@@ -317,3 +221,16 @@
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }}"
+
+    - name: "=== MAC ADRESY ZAPISANE ==="
+      ansible.builtin.debug:
+        msg: |
+          MAC adresy zapisane do: clusters/.generated/{{ cluster_name }}.yml
+          Plik źródłowy NIE został zmodyfikowany: clusters/{{ cluster_name }}.yml
+
+          Następne kroki:
+          1. Uzupełnij IP adresy w pliku źródłowym (jeśli jeszcze nie zrobione):
+             vi clusters/{{ cluster_name }}.yml
+
+          2. Wygeneruj ISO (automatycznie wczyta MAC z .generated/):
+             ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
