@@ -47,15 +47,31 @@
 
     - name: Czekaj na zakończenie bootstrap
       ansible.builtin.command:
-        cmd: "{{ openshift_install_binary }} agent wait-for bootstrap-complete --dir={{ install_dir }}"
+        cmd: "{{ openshift_install_binary }} agent wait-for bootstrap-complete --dir={{ install_dir }} --log-level=warn"
       register: bootstrap_result
       when: stage == 'bootstrap' or stage == 'complete'
       changed_when: false
+      # ignore_errors: bootstrap może przekroczyć timeout mimo że klaster faktycznie
+      # się bootstrapuje — w takim przypadku install-complete i tak zadziała
+      ignore_errors: true
+
+    - name: Bootstrap — timeout ale kontynuuję
+      ansible.builtin.debug:
+        msg: |
+          Bootstrap-complete przekroczył timeout lub zwrócił błąd.
+          Klaster może być już za tym etapem — kontynuuję do install-complete.
+          Jeśli chcesz sprawdzić ręcznie:
+            {{ openshift_install_binary }} agent wait-for bootstrap-complete --dir={{ install_dir }}
+      when:
+        - stage == 'bootstrap' or stage == 'complete'
+        - bootstrap_result is failed
 
     - name: Bootstrap zakończony
       ansible.builtin.debug:
         msg: "Bootstrap zakończony pomyślnie!"
-      when: stage == 'bootstrap' or stage == 'complete'
+      when:
+        - stage == 'bootstrap' or stage == 'complete'
+        - bootstrap_result is succeeded
 
     # =========================================================================
     # Czekaj na pełną instalację
