@@ -152,8 +152,8 @@
         cmd: >
           oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
             {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
-              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 2},
-              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 1}
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 2}
             ]},
             {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
               {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},

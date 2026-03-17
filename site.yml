@@ -14,9 +14,11 @@
 # Etapy:
 #   1. Tworzenie VM (create-virt-env.yml)
 #   2. Generowanie ISO (generate-ocp-agent-iso.yml)
-#   3. Upload ISO + podpięcie CDROM + start VM z CDROM (cdrom/attach-iso.yml)
-#   4. Zmiana boot order na dysk (cdrom/bootorder.yml) — efekt przy następnym reboocie
-#   5. Monitorowanie instalacji — bootstrap + complete (wait-ocp-install.yml)
+#   3. Upload ISO + podpięcie CDROM + start VM (cdrom/attach-iso.yml)
+#      Boot order: rootdisk=1, cdrom=2
+#      Pusty rootdisk → UEFI odpada do CDROM → instalacja
+#      Po instalacji reboot → rootdisk ma GRUB → bootuje z dysku automatycznie
+#   4. Monitorowanie instalacji — bootstrap + complete (wait-ocp-install.yml)
 # =============================================================================
 
 # Krok 1: Tworzenie VM
@@ -28,14 +30,12 @@
   ansible.builtin.import_playbook: generate-ocp-agent-iso.yml
 
 # Krok 3: Upload ISO, podpięcie CDROM, start VM
-- name: "=== KROK 3/5: UPLOAD ISO + START VM Z CDROM ==="
+# Boot order: rootdisk=1, cdrom=2
+# Pusty rootdisk nie ma bootloadera → UEFI odpada do CDROM → instalacja
+# Po instalacji i rebootcie → rootdisk ma GRUB → bootuje z dysku, CDROM ignorowany
+- name: "=== KROK 3/4: UPLOAD ISO + START VM ==="
   ansible.builtin.import_playbook: cdrom/attach-iso.yml
 
-# Krok 4: Zmiana boot order na dysk (efekt przy następnym reboocie VM)
-# VM teraz bootuje z CDROM — po bootstrap zrobi reboot i wstanie z dysku
-- name: "=== KROK 4/5: USTAWIENIE BOOT ORDER (DYSK JAKO PIERWSZY) ==="
-  ansible.builtin.import_playbook: cdrom/bootorder.yml
-
-# Krok 5: Monitorowanie instalacji
-- name: "=== KROK 5/5: MONITOROWANIE INSTALACJI ==="
+# Krok 4: Monitorowanie instalacji
+- name: "=== KROK 4/4: MONITOROWANIE INSTALACJI ==="
   ansible.builtin.import_playbook: wait-ocp-install.yml
