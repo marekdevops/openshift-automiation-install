@@ -10,9 +10,10 @@
 #   - VM utworzone przez create-virt-env.yml
 #
 # Co robi:
-#   1. Uploaduje ISO do PVC (jeśli nie istnieje)
+#   1. Uploaduje ISO do DataVolume (jeśli nie istnieje)
 #   2. Podpina CDROM do każdej VM
-#   3. Ustawia boot order: CDROM pierwszy
+#   3. Ustawia boot order: rootdisk=1, cdrom=2
+#      (pusty rootdisk → UEFI odpada do CDROM → instalacja → po reboot bootuje z dysku)
 #   4. Restartuje VM
 # =============================================================================
 
@@ -23,7 +24,7 @@
 
   vars:
     install_dir: "/tmp/ocp-install/{{ cluster_name }}"
-    iso_file: "{{ install_dir }}/agent.x86_64.iso"
+    iso_file: "/tmp/ocp-install/{{ cluster_name }}/agent.x86_64.iso"
 
   tasks:
     # =========================================================================
