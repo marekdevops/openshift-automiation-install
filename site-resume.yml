@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# Resume playbook: wznowienie instalacji od podpięcia ISO
+# =============================================================================
+# Użycie gdy site.yml stanął na etapie cdrom/attach-iso lub później:
+#   ansible-playbook site-resume.yml -e @clusters/ocp1.yml
+#
+# Zakłada że:
+#   - VM istnieją (create-virt-env.yml już przeszedł)
+#   - ISO zostało wygenerowane (generate-ocp-agent-iso.yml już przeszedł)
+# =============================================================================
+
+- name: "=== WZNOWIENIE: UPLOAD ISO + START VM ==="
+  ansible.builtin.import_playbook: cdrom/attach-iso.yml
+
+- name: "=== WZNOWIENIE: MONITOROWANIE INSTALACJI ==="
+  ansible.builtin.import_playbook: wait-ocp-install.yml
