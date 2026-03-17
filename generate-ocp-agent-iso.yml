@@ -38,6 +38,15 @@
     - name: Wczytaj wygenerowane MAC adresy
       ansible.builtin.include_tasks: tasks/load-generated-vars.yml
 
+    - name: Błąd — brak wygenerowanego pliku z MAC adresami
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono clusters/.generated/{{ cluster_name }}.yml
+
+          Uruchom najpierw:
+            ansible-playbook create-virt-env.yml -e @clusters/{{ cluster_name }}.yml
+      when: not _generated_vars_stat.stat.exists
+
     # =========================================================================
     # Krok 1: Walidacja wymagań
     # =========================================================================
