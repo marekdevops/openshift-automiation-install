@@ -8,17 +8,21 @@ baseDomain: {{ base_domain }}
 # Single Node OpenShift
 compute:
   - name: worker
+    hyperthreading: Enabled
     replicas: 0
 controlPlane:
   name: master
+  hyperthreading: Enabled
   replicas: 1
 {% else %}
 # Multi-node cluster
 compute:
   - name: worker
+    hyperthreading: Enabled
     replicas: {{ nodes | selectattr('role', 'equalto', 'worker') | list | length }}
 controlPlane:
   name: master
+  hyperthreading: Enabled
   replicas: {{ nodes | selectattr('role', 'equalto', 'master') | list | length }}
 {% endif %}
 

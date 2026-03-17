@@ -13,7 +13,7 @@
 - name: Monitorowanie instalacji OpenShift
   hosts: localhost
   connection: local
-  gather_facts: false
+  gather_facts: true
 
   vars:
     stage: complete
@@ -99,13 +99,84 @@
       when: stage == 'complete'
       ignore_errors: true
 
+    # =========================================================================
+    # Weryfikacja stanu operatorów klastra
+    # =========================================================================
+    - name: "=== WERYFIKACJA OPERATORÓW KLASTRA ==="
+      ansible.builtin.debug:
+        msg: "Sprawdzam stan wszystkich operatorów klastra..."
+      when: stage == 'complete'
+
+    - name: Poczekaj aż wszyscy operatorzy będą Available
+      ansible.builtin.command:
+        cmd: >
+          oc get clusteroperators
+          --kubeconfig={{ install_dir }}/auth/kubeconfig
+          -o jsonpath='{.items[?(@.status.conditions[?(@.type=="Available")].status=="False")].metadata.name}'
+      register: degraded_operators
+      until: degraded_operators.stdout | trim == ''
+      retries: 60
+      delay: 30
+      when: stage == 'complete'
+      changed_when: false
+      ignore_errors: true
+
+    - name: Pokaż stan operatorów
+      ansible.builtin.command:
+        cmd: >
+          oc get clusteroperators
+          --kubeconfig={{ install_dir }}/auth/kubeconfig
+      register: co_status
+      changed_when: false
+      when: stage == 'complete'
+      ignore_errors: true
+
+    - name: Stan operatorów
+      ansible.builtin.debug:
+        msg: "{{ co_status.stdout_lines }}"
+      when:
+        - stage == 'complete'
+        - co_status is defined
+
+    - name: Ostrzeżenie — niesprawne operatory
+      ansible.builtin.debug:
+        msg: |
+          UWAGA: Następujące operatory nie są Available:
+          {{ degraded_operators.stdout }}
+
+          Sprawdź: oc get clusteroperators --kubeconfig={{ install_dir }}/auth/kubeconfig
+          Logi:    oc describe co <nazwa> --kubeconfig={{ install_dir }}/auth/kubeconfig
+      when:
+        - stage == 'complete'
+        - degraded_operators is defined
+        - degraded_operators.stdout | default('') | trim != ''
+
+    # =========================================================================
+    # Eksport kubeconfig
+    # =========================================================================
+    - name: Skopiuj kubeconfig do ~/.kube/{{ cluster_name }}
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/auth/kubeconfig"
+        dest: "{{ ansible_env.HOME }}/.kube/{{ cluster_name }}"
+        mode: '0600'
+      when: stage == 'complete'
+      ignore_errors: true
+
     - name: "=== DANE DOSTĘPOWE ==="
       ansible.builtin.debug:
         msg: |
           Console: https://console-openshift-console.apps.{{ cluster_name }}.{{ base_domain }}
-          API: https://api.{{ cluster_name }}.{{ base_domain }}:6443
-          User: kubeadmin
-          Password: {{ kubeadmin_pass.content | b64decode | default('sprawdź plik auth/kubeadmin-password') }}
+          API:     https://api.{{ cluster_name }}.{{ base_domain }}:6443
+          User:    kubeadmin
+          Password: {{ kubeadmin_pass.content | b64decode | trim | default('sprawdź plik auth/kubeadmin-password') }}
+
+          Kubeconfig:
+          export KUBECONFIG={{ install_dir }}/auth/kubeconfig
+          # lub: export KUBECONFIG=~/.kube/{{ cluster_name }}
+
+          Weryfikacja:
+          oc whoami --kubeconfig={{ install_dir }}/auth/kubeconfig
+          oc get nodes --kubeconfig={{ install_dir }}/auth/kubeconfig
       when:
         - stage == 'complete'
         - kubeadmin_pass is defined

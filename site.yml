@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# Master playbook: Pełna instalacja OpenShift od zera do działającego klastra
+# =============================================================================
+# Użycie:
+#   ansible-playbook site.yml -e @clusters/ocp1.yml
+#
+# Wymagania:
+#   - oc zalogowany do klastra (OpenShift Virtualization)
+#   - openshift-install binary w /usr/local/bin/openshift-install
+#   - pull-secret.json w ~/.openshift/pull-secret.json
+#   - virtctl w PATH
+#
+# Etapy:
+#   1. Tworzenie VM (create-virt-env.yml)
+#   2. Generowanie ISO (generate-ocp-agent-iso.yml)
+#   3. Upload ISO + podpięcie CDROM + start VM z CDROM (cdrom/attach-iso.yml)
+#   4. Zmiana boot order na dysk (cdrom/bootorder.yml) — efekt przy następnym reboocie
+#   5. Monitorowanie instalacji — bootstrap + complete (wait-ocp-install.yml)
+# =============================================================================
+
+# Krok 1: Tworzenie VM
+- name: "=== KROK 1/5: TWORZENIE VM ==="
+  ansible.builtin.import_playbook: create-virt-env.yml
+
+# Krok 2: Generowanie ISO
+- name: "=== KROK 2/5: GENEROWANIE ISO ==="
+  ansible.builtin.import_playbook: generate-ocp-agent-iso.yml
+
+# Krok 3: Upload ISO, podpięcie CDROM, start VM
+- name: "=== KROK 3/5: UPLOAD ISO + START VM Z CDROM ==="
+  ansible.builtin.import_playbook: cdrom/attach-iso.yml
+
+# Krok 4: Zmiana boot order na dysk (efekt przy następnym reboocie VM)
+# VM teraz bootuje z CDROM — po bootstrap zrobi reboot i wstanie z dysku
+- name: "=== KROK 4/5: USTAWIENIE BOOT ORDER (DYSK JAKO PIERWSZY) ==="
+  ansible.builtin.import_playbook: cdrom/bootorder.yml
+
+# Krok 5: Monitorowanie instalacji
+- name: "=== KROK 5/5: MONITOROWANIE INSTALACJI ==="
+  ansible.builtin.import_playbook: wait-ocp-install.yml

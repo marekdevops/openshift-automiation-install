@@ -36,6 +36,13 @@ namespace: proj-vms
 iso_pvc_name: agent-iso-pvc
 multus_network: default/vlan214-net
 
+# Nazwa interfejsu OS dla karty sieciowej podłączonej do sieci klastra (vlan/Multus).
+# W q35+virtio VM z dwoma NIC-ami:
+#   - enp1s0 = pierwszy NIC (default/pod network, masquerade NAT) — NIE TEN
+#   - enp2s0 = drugi NIC (vlan214/Multus bridge) — TEN WŁAŚNIE
+# Aby zweryfikować: virtctl console <vm-name> -n <namespace>, następnie: ip link show
+node_interface_name: enp2s0
+
 # Domyślne zasoby VM (można nadpisać per-node)
 vm_defaults:
   cpu_sockets: 8

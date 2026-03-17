@@ -100,6 +100,29 @@
           Gateway: {{ gateway }}
 
     # =========================================================================
+    # Krok 2b: Walidacja MAC adresów
+    # =========================================================================
+    - name: Zbierz węzły z brakującym MAC
+      ansible.builtin.set_fact:
+        nodes_missing_mac: "{{ nodes | selectattr('mac', 'equalto', '') | list }}"
+
+    - name: Błąd — brakujące MAC adresy
+      ansible.builtin.fail:
+        msg: |
+          Następujące węzły mają pusty MAC adres:
+          {% for n in nodes_missing_mac %}
+            - {{ n.name }} ({{ n.hostname }}, {{ n.role }})
+          {% endfor %}
+
+          Uruchom najpierw: ansible-playbook create-virt-env.yml -e @clusters/{{ cluster_name }}.yml
+          a następnie uzupełnij plik konfiguracyjny.
+      when: nodes_missing_mac | length > 0
+
+    - name: Walidacja — wszystkie MAC adresy obecne
+      ansible.builtin.debug:
+        msg: "Walidacja MAC: OK — wszystkie {{ nodes | length }} węzły mają MAC adresy"
+
+    # =========================================================================
     # Krok 3: Przygotuj katalog instalacyjny
     # =========================================================================
     - name: Usuń stary katalog instalacyjny (jeśli istnieje)
@@ -134,13 +157,28 @@
 
     - name: Pokaż wygenerowany install-config.yaml (bez secretów)
       ansible.builtin.shell: |
-        cat {{ install_dir }}/install-config.yaml | grep -v pullSecret | grep -v sshKey
+        grep -v pullSecret {{ install_dir }}/install-config.yaml | grep -v sshKey
       register: install_config_preview
       changed_when: false
 
     - name: Preview install-config.yaml
       ansible.builtin.debug:
         msg: "{{ install_config_preview.stdout_lines }}"
+
+    - name: Pokaż wygenerowany agent-config.yaml
+      ansible.builtin.debug:
+        msg: "{{ lookup('file', install_dir + '/agent-config.yaml') | split('\n') }}"
+
+    - name: "=== WERYFIKACJA INTERFEJSU SIECIOWEGO ==="
+      ansible.builtin.debug:
+        msg: |
+          Używam interfejsu: {{ node_interface_name | default('enp2s0') }}
+          (zmienna node_interface_name w pliku klastra)
+
+          WAŻNE: Interfejs musi być DRUGĄ kartą sieciową VM (vlan/Multus).
+          W q35+virtio: default(pod)=enp1s0, vlan214(multus)=enp2s0
+          Aby sprawdzić: virtctl console <vm-name> -n {{ namespace }}
+          Następnie: ip link show
 
     # =========================================================================
     # Krok 5: Przygotuj lokalne RHCOS ISO (air-gapped)
