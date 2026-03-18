@@ -1,0 +1,112 @@
+---
+# =============================================================================
+# Playbook: Konfiguracja HAProxy na RHEL VM
+# =============================================================================
+# Instaluje i konfiguruje HAProxy jako load balancer dla klastra OpenShift.
+# Wymagany dostep SSH do VM (uruchamiany po create-rhel-vm.yml).
+#
+# Uzycie (samodzielne):
+#   ansible-playbook haproxy/configure-haproxy.yml \
+#     -e @clusters/ocp1.yml \
+#     -e haproxy_host=192.168.214.5 \
+#     -e ssh_user=cloud-user
+#
+# Zazwyczaj uruchamiany przez deploy-haproxy.yml (nie bezposrednio).
+# =============================================================================
+
+- name: "Konfiguracja HAProxy dla {{ cluster_name }}.{{ base_domain }}"
+  hosts: rhel_vm
+  become: true
+  gather_facts: true
+
+  tasks:
+    # =========================================================================
+    # Instalacja HAProxy
+    # =========================================================================
+    - name: Zainstaluj HAProxy
+      ansible.builtin.dnf:
+        name: haproxy
+        state: present
+
+    # =========================================================================
+    # Konfiguracja SELinux dla niestandardowych portow
+    # =========================================================================
+    - name: Zainstaluj policycoreutils dla semanage
+      ansible.builtin.dnf:
+        name: policycoreutils-python-utils
+        state: present
+
+    - name: SELinux — zezwol HAProxy na bind do portow OCP
+      community.general.seport:
+        ports: "{{ item }}"
+        proto: tcp
+        setype: http_port_t
+        state: present
+      loop:
+        - 6443
+        - 22623
+        - 9000
+
+    - name: SELinux — zezwol HAProxy na polaczenia sieciowe
+      ansible.posix.seboolean:
+        name: haproxy_connect_any
+        state: true
+        persistent: true
+
+    # =========================================================================
+    # Konfiguracja HAProxy
+    # =========================================================================
+    - name: Wdrozenie konfiguracji HAProxy
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/haproxy.cfg.j2"
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        validate: haproxy -c -f %s
+      notify: restart haproxy
+
+    # =========================================================================
+    # Firewall — otworz porty load balancera
+    # =========================================================================
+    - name: Otworz porty HAProxy w firewalld
+      ansible.posix.firewalld:
+        port: "{{ item }}/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - "6443"    # API Server
+        - "22623"   # Machine Config Server
+        - "443"     # Ingress HTTPS
+        - "80"      # Ingress HTTP
+        - "9000"    # Stats
+
+    # =========================================================================
+    # Uruchom i wlacz HAProxy
+    # =========================================================================
+    - name: Wlacz i uruchom HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: started
+        enabled: true
+
+    - name: Sprawdz status HAProxy
+      ansible.builtin.command:
+        cmd: systemctl is-active haproxy
+      register: haproxy_status
+      changed_when: false
+
+    - name: "=== HAProxy SKONFIGUROWANY ==="
+      ansible.builtin.debug:
+        msg: >-
+          HAProxy dziala na {{ ansible_host }}
+          — API: 6443, MCS: 22623, Ingress: 80/443, Stats: 9000
+          — Panel: http://{{ ansible_host }}:9000/stats
+
+  handlers:
+    - name: restart haproxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted

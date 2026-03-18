@@ -1,0 +1,44 @@
+# =============================================================================
+# Konfiguracja infrastruktury: AD, Satellite, obraz RHEL
+# =============================================================================
+# Plik ze zmiennymi infrastrukturalnymi, niezaleznymi od klastra OCP.
+# Uzywany razem z clusters/<name>.yml:
+#   ansible-playbook create-rhel-vm.yml -e @clusters/ocp1.yml -e @vars/infra.yml
+#
+# Haslo do AD jest pobierane z terminala (vars_prompt) — NIE zapisuj go tu.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Active Directory
+# -----------------------------------------------------------------------------
+ad_domain: example.com
+ad_bind_user: svc-adjoin
+ad_ou: "OU=Servers,DC=example,DC=com"
+
+# Grupy AD z prawem logowania na serwer
+ad_login_groups:
+  - "linux-admins"
+
+# -----------------------------------------------------------------------------
+# Red Hat Satellite
+# -----------------------------------------------------------------------------
+satellite_url: satellite.example.com
+satellite_org: "MyOrg"
+satellite_activation_key: "rhel9-base"
+
+# -----------------------------------------------------------------------------
+# Obraz RHEL
+# -----------------------------------------------------------------------------
+# Opcja 1: URL do obrazu cloud (qcow2) — CDI pobierze automatycznie
+# rhel_image_url: "https://download.example.com/rhel-9.5-x86_64-kvm.qcow2"
+
+# Opcja 2: Istniejacy PVC/DataVolume w klastrze z bazowym obrazem RHEL
+rhel_image_pvc: rhel9-base
+# rhel_image_pvc_namespace: openshift-virtualization-os-images
+
+# -----------------------------------------------------------------------------
+# SSH
+# -----------------------------------------------------------------------------
+ssh_user: cloud-user
+ssh_private_key_file: ~/.ssh/id_ed25519
+# ssh_public_key_file: juz zdefiniowany w generate-ocp-agent-iso.yml (~/.ssh/id_ed25519.pub)

@@ -1,0 +1,357 @@
+---
+# =============================================================================
+# Playbook: Tworzenie maszyny wirtualnej RHEL na OpenShift Virtualization
+# =============================================================================
+# Generyczny playbook do tworzenia VM z RHEL, integracji z AD i Satellite.
+# Moze sluzyc jako baza do dowolnej VM (HAProxy, DNS, monitoring, itd.)
+#
+# Uzycie:
+#   ansible-playbook create-rhel-vm.yml \
+#     -e @clusters/ocp1.yml \
+#     -e @vars/infra.yml \
+#     -e vm_name=ocp1-haproxy \
+#     -e vm_hostname=haproxy \
+#     -e vm_ip=192.168.214.5
+#
+# Lub z sekcji haproxy w pliku klastra:
+#   -e vm_name={{ haproxy.name }} -e vm_hostname={{ haproxy.hostname }} ...
+#
+# Wymagania:
+#   - oc zalogowany do klastra
+#   - obraz RHEL (rhel_image_url lub rhel_image_pvc w vars/infra.yml)
+#   - klucz SSH (ssh_public_key_file)
+#   - dostep SSH do VM po IP (vm_ip) z hosta Ansible
+# =============================================================================
+
+# ============================================================================
+# Play 1: Tworzenie VM na OpenShift Virtualization
+# ============================================================================
+- name: "Tworzenie RHEL VM: {{ vm_name }}"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ssh_public_key_file: ~/.ssh/id_ed25519.pub
+    ssh_private_key_file: ~/.ssh/id_ed25519
+    ssh_user: cloud-user
+
+  vars_prompt:
+    - name: ad_bind_password
+      prompt: "Haslo konta AD ({{ ad_bind_user | default('svc-adjoin') }}@{{ ad_domain | default('example.com') }})"
+      private: true
+
+  tasks:
+    # =========================================================================
+    # Walidacja
+    # =========================================================================
+    - name: Walidacja — wymagane zmienne
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_hostname is defined
+          - vm_ip is defined
+          - namespace is defined
+          - multus_network is defined
+        fail_msg: "Brakuje wymaganej zmiennej. Podaj: vm_name, vm_hostname, vm_ip"
+
+    - name: Walidacja — zrodlo obrazu RHEL
+      ansible.builtin.assert:
+        that:
+          - rhel_image_url is defined or rhel_image_pvc is defined
+        fail_msg: |
+          Brak zrodla obrazu RHEL.
+          Ustaw rhel_image_url lub rhel_image_pvc w vars/infra.yml
+
+    # =========================================================================
+    # Sprawdz czy VM juz istnieje
+    # =========================================================================
+    - name: Sprawdz czy VM juz istnieje
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ vm_name }}"
+      register: existing_vm
+
+    - name: VM juz istnieje — pomijam tworzenie
+      ansible.builtin.debug:
+        msg: "VM {{ vm_name }} juz istnieje w {{ namespace }} — pomijam tworzenie"
+      when: existing_vm.resources | length > 0
+
+    # =========================================================================
+    # Przygotuj cloud-init i utworz VM
+    # =========================================================================
+    - name: Przygotuj cloud-init userdata
+      ansible.builtin.set_fact:
+        _cloud_init_userdata: "{{ lookup('template', 'templates/rhel-cloud-init.j2') }}"
+        _cloud_init_networkdata: "{{ lookup('template', 'templates/rhel-network-config.j2') }}"
+      when: existing_vm.resources | length == 0
+
+    - name: Utworz VM
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'templates/rhel-vm.yaml.j2') }}"
+      when: existing_vm.resources | length == 0
+
+    # =========================================================================
+    # Poczekaj na uruchomienie
+    # =========================================================================
+    - name: Poczekaj na uruchomienie VMI
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ vm_name }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+
+    - name: Poczekaj na SSH ({{ vm_ip }}:22)
+      ansible.builtin.wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        timeout: 300
+        delay: 10
+      register: ssh_wait
+      ignore_errors: true
+
+    - name: Blad — SSH niedostepny
+      ansible.builtin.fail:
+        msg: |
+          Nie udalo sie polaczyc z {{ vm_ip }}:22 w ciagu 5 minut.
+          Sprawdz:
+            - czy host Ansible ma dostep do sieci {{ machine_network }}
+            - virtctl console {{ vm_name }} -n {{ namespace }}
+            - ip addr show na VM
+      when: ssh_wait is failed
+
+    # =========================================================================
+    # Dodaj hosta do inventory
+    # =========================================================================
+    - name: Dodaj VM do inventory
+      ansible.builtin.add_host:
+        name: rhel_vm
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: "{{ ssh_user | default('cloud-user') }}"
+        ansible_ssh_private_key_file: "{{ ssh_private_key_file | default('~/.ssh/id_ed25519') }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        # Przekaz zmienne do nastepnych play
+        ad_bind_password: "{{ ad_bind_password }}"
+        ad_domain: "{{ ad_domain | default('') }}"
+        ad_bind_user: "{{ ad_bind_user | default('') }}"
+        ad_ou: "{{ ad_ou | default('') }}"
+        ad_login_groups: "{{ ad_login_groups | default([]) }}"
+        satellite_url: "{{ satellite_url | default('') }}"
+        satellite_org: "{{ satellite_org | default('') }}"
+        satellite_activation_key: "{{ satellite_activation_key | default('') }}"
+        vm_hostname: "{{ vm_hostname }}"
+        base_domain: "{{ base_domain }}"
+
+    - name: "=== VM {{ vm_name }} GOTOWA ==="
+      ansible.builtin.debug:
+        msg: "VM {{ vm_name }} dziala pod {{ vm_ip }}, SSH dostepny"
+
+# ============================================================================
+# Play 2: Rejestracja Satellite
+# ============================================================================
+- name: "Rejestracja Satellite: {{ hostvars['rhel_vm']['vm_hostname'] }}"
+  hosts: rhel_vm
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Sprawdz czy rejestracja Satellite jest skonfigurowana
+      ansible.builtin.set_fact:
+        _do_satellite: "{{ satellite_activation_key | default('') | length > 0 }}"
+
+    - name: Zarejestruj w Satellite
+      community.general.redhat_subscription:
+        state: present
+        activationkey: "{{ satellite_activation_key }}"
+        org_id: "{{ satellite_org }}"
+        server_hostname: "{{ satellite_url }}"
+      when: _do_satellite | bool
+      ignore_errors: true
+
+    - name: Satellite — pomijam (brak konfiguracji)
+      ansible.builtin.debug:
+        msg: "satellite_activation_key nie ustawiony — pomijam rejestracje"
+      when: not _do_satellite | bool
+
+# ============================================================================
+# Play 3: Integracja z Active Directory
+# ============================================================================
+- name: "Integracja AD: {{ hostvars['rhel_vm']['vm_hostname'] }}"
+  hosts: rhel_vm
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Sprawdz czy AD jest skonfigurowane
+      ansible.builtin.set_fact:
+        _do_ad: "{{ ad_domain | default('') | length > 0 }}"
+
+    - name: Zainstaluj pakiety do integracji z AD
+      ansible.builtin.dnf:
+        name:
+          - realmd
+          - sssd
+          - sssd-tools
+          - oddjob
+          - oddjob-mkhomedir
+          - adcli
+          - samba-common-tools
+          - krb5-workstation
+        state: present
+      when: _do_ad | bool
+
+    - name: Wlacz automatyczne tworzenie katalogow domowych
+      ansible.builtin.command:
+        cmd: authselect enable-feature with-mkhomedir
+      changed_when: true
+      when: _do_ad | bool
+      ignore_errors: true
+
+    - name: Dolacz do domeny AD
+      ansible.builtin.command:
+        cmd: >
+          realm join
+          --user={{ ad_bind_user }}
+          {% if ad_ou | default('') | length > 0 %}--computer-ou="{{ ad_ou }}"{% endif %}
+          {{ ad_domain }}
+        stdin: "{{ ad_bind_password }}"
+      no_log: true
+      when: _do_ad | bool
+      register: realm_join
+      changed_when: realm_join.rc == 0
+      failed_when:
+        - realm_join.rc != 0
+        - "'Already joined' not in realm_join.stderr | default('')"
+
+    - name: Ogranicz logowanie do wybranych grup AD
+      ansible.builtin.command:
+        cmd: "realm permit -g '{{ item }}'"
+      loop: "{{ ad_login_groups | default([]) }}"
+      when:
+        - _do_ad | bool
+        - ad_login_groups | default([]) | length > 0
+      changed_when: true
+
+    - name: Konfiguracja SSSD — uzyj krotkich nazw (bez @domain)
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^use_fully_qualified_names'
+        line: 'use_fully_qualified_names = False'
+        state: present
+      notify: restart sssd
+      when: _do_ad | bool
+
+    - name: Konfiguracja SSSD — domyslna powloka
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^fallback_homedir'
+        line: 'fallback_homedir = /home/%u'
+        state: present
+      notify: restart sssd
+      when: _do_ad | bool
+
+    - name: AD — pomijam (brak konfiguracji)
+      ansible.builtin.debug:
+        msg: "ad_domain nie ustawiony — pomijam integracje AD"
+      when: not _do_ad | bool
+
+  handlers:
+    - name: restart sssd
+      ansible.builtin.service:
+        name: sssd
+        state: restarted
+
+# ============================================================================
+# Play 4: Hardening (rekomendacje Red Hat dla RHEL 9)
+# ============================================================================
+- name: "Hardening: {{ hostvars['rhel_vm']['vm_hostname'] }}"
+  hosts: rhel_vm
+  become: true
+  gather_facts: false
+
+  tasks:
+    # =========================================================================
+    # Firewall
+    # =========================================================================
+    - name: Wlacz i uruchom firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Ustaw domyslna zone na public
+      ansible.posix.firewalld:
+        zone: public
+        state: enabled
+        permanent: true
+        immediate: true
+        interface: "{{ node_interface_name | default('enp2s0') }}"
+      ignore_errors: true
+
+    - name: Zezwol na SSH
+      ansible.posix.firewalld:
+        service: ssh
+        permanent: true
+        state: enabled
+        immediate: true
+
+    # =========================================================================
+    # SELinux
+    # =========================================================================
+    - name: SELinux w trybie enforcing
+      ansible.posix.selinux:
+        policy: targeted
+        state: enforcing
+
+    # =========================================================================
+    # Bezpieczenstwo systemu
+    # =========================================================================
+    - name: Wylacz logowanie root przez SSH
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: restart sshd
+
+    - name: Wymus uwierzytelnianie kluczem SSH
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: restart sshd
+
+    - name: Wlacz automatyczne aktualizacje bezpieczenstwa (dnf-automatic)
+      ansible.builtin.dnf:
+        name: dnf-automatic
+        state: present
+
+    - name: Skonfiguruj dnf-automatic na security only
+      ansible.builtin.lineinfile:
+        path: /etc/dnf/automatic.conf
+        regexp: '^upgrade_type'
+        line: 'upgrade_type = security'
+
+    - name: Wlacz timer dnf-automatic
+      ansible.builtin.service:
+        name: dnf-automatic.timer
+        state: started
+        enabled: true
+
+    - name: "=== HARDENING ZAKONCZONY ==="
+      ansible.builtin.debug:
+        msg: "VM zhardowana: firewalld, SELinux enforcing, SSH hardened, dnf-automatic"
+
+  handlers:
+    - name: restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted

@@ -1,0 +1,62 @@
+---
+# =============================================================================
+# Playbook: Wdrozenie HAProxy VM jako load balancer dla OpenShift
+# =============================================================================
+# Orkiestrator: tworzy RHEL VM, potem konfiguruje HAProxy.
+# Korzysta z tego samego pliku klastra co reszta playbooki OCP.
+#
+# Uzycie:
+#   ansible-playbook haproxy/deploy-haproxy.yml \
+#     -e @clusters/ocp1.yml \
+#     -e @vars/infra.yml
+#
+# Wymagania:
+#   - oc zalogowany do klastra
+#   - obraz RHEL (rhel_image_url lub rhel_image_pvc w vars/infra.yml)
+#   - sekcja haproxy: w pliku klastra (clusters/<name>.yml)
+#   - dostep SSH do VM z hosta Ansible
+# =============================================================================
+
+# ============================================================================
+# Play 1: Walidacja konfiguracji haproxy
+# ============================================================================
+- name: "Walidacja konfiguracji HAProxy"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Walidacja — sekcja haproxy w konfiguracji klastra
+      ansible.builtin.assert:
+        that:
+          - haproxy is defined
+          - haproxy.name is defined
+          - haproxy.hostname is defined
+          - haproxy.ip is defined
+        fail_msg: |
+          Brak sekcji haproxy w pliku klastra.
+          Dodaj do clusters/{{ cluster_name }}.yml:
+            haproxy:
+              name: {{ cluster_name }}-haproxy
+              hostname: haproxy
+              ip: 192.168.214.5
+
+# ============================================================================
+# Play 2: Utworz RHEL VM (generyczny playbook)
+# ============================================================================
+- name: "Tworzenie VM HAProxy"
+  ansible.builtin.import_playbook: ../create-rhel-vm.yml
+  vars:
+    vm_name: "{{ haproxy.name }}"
+    vm_hostname: "{{ haproxy.hostname }}"
+    vm_ip: "{{ haproxy.ip }}"
+    vm_cpu_sockets: "{{ haproxy.cpu | default(2) }}"
+    vm_memory: "{{ haproxy.memory | default('4Gi') }}"
+    vm_disk_size: "{{ haproxy.disk_size | default('30Gi') }}"
+    vm_role: haproxy
+
+# ============================================================================
+# Play 3: Konfiguracja HAProxy
+# ============================================================================
+- name: "Konfiguracja HAProxy"
+  ansible.builtin.import_playbook: configure-haproxy.yml

@@ -1,0 +1,95 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ vm_name }}
+  namespace: {{ namespace }}
+  labels:
+    app: rhel-vm
+    role: {{ vm_role | default('infra') }}
+    managed-by: ansible
+spec:
+  runStrategy: Always
+
+  dataVolumeTemplates:
+    - metadata:
+        name: {{ vm_name }}-rootdisk
+      spec:
+{% if rhel_image_url is defined %}
+        source:
+          http:
+            url: "{{ rhel_image_url }}"
+{% elif rhel_image_pvc is defined %}
+        source:
+          pvc:
+            name: {{ rhel_image_pvc }}
+            namespace: {{ rhel_image_pvc_namespace | default(namespace) }}
+{% endif %}
+        storage:
+          resources:
+            requests:
+              storage: {{ vm_disk_size | default('30Gi') }}
+          accessModes:
+            - ReadWriteMany
+
+  template:
+    metadata:
+      labels:
+        app: rhel-vm
+        role: {{ vm_role | default('infra') }}
+        managed-by: ansible
+    spec:
+      evictionStrategy: LiveMigrate
+
+      domain:
+        machine:
+          type: q35
+
+        cpu:
+          model: host-passthrough
+          sockets: {{ vm_cpu_sockets | default(2) }}
+          cores: 1
+          threads: 1
+
+        memory:
+          guest: {{ vm_memory | default('4Gi') }}
+
+        devices:
+          networkInterfaceMultiqueue: true
+          rng: {}
+          autoattachGraphicsDevice: true
+
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+              bootOrder: 1
+            - name: cloudinit
+              disk:
+                bus: virtio
+
+          interfaces:
+            - name: default
+              masquerade: {}
+              model: virtio
+            - name: vlan214
+              bridge: {}
+              model: virtio
+
+        resources: {}
+
+      networks:
+        - name: default
+          pod: {}
+        - name: vlan214
+          multus:
+            networkName: {{ multus_network }}
+
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: {{ vm_name }}-rootdisk
+        - name: cloudinit
+          cloudInitNoCloud:
+            userDataBase64: {{ _cloud_init_userdata | b64encode }}
+            networkDataBase64: {{ _cloud_init_networkdata | b64encode }}

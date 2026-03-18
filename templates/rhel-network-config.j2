@@ -1,0 +1,14 @@
+version: 2
+ethernets:
+  {{ node_interface_name | default('enp2s0') }}:
+    dhcp4: false
+    addresses:
+      - {{ vm_ip }}/{{ machine_network | ansible.utils.ipaddr('prefix') }}
+    routes:
+      - to: 0.0.0.0/0
+        via: {{ gateway }}
+    nameservers:
+      addresses:
+{% for dns in dns_servers %}
+        - {{ dns }}
+{% endfor %}

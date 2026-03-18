@@ -114,6 +114,18 @@ nodes:
   #   ip: 192.168.214.21
 
 # -----------------------------------------------------------------------------
+# HAProxy — zewnetrzny load balancer
+# -----------------------------------------------------------------------------
+# Uzywane przez: ansible-playbook haproxy/deploy-haproxy.yml -e @clusters/ocp1.yml -e @vars/infra.yml
+haproxy:
+  name: ocp1-haproxy
+  hostname: haproxy
+  ip: 192.168.214.5
+  cpu: 2
+  memory: 4Gi
+  disk_size: 30Gi
+
+# -----------------------------------------------------------------------------
 # Opcje instalacji
 # -----------------------------------------------------------------------------
 single_node: false

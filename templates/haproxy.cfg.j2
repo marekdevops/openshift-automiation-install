@@ -1,0 +1,100 @@
+# =============================================================================
+# HAProxy — load balancer dla OpenShift {{ cluster_name }}.{{ base_domain }}
+# Wygenerowane automatycznie przez Ansible — NIE EDYTUJ RECZNIE
+# =============================================================================
+
+global
+    log         /dev/log local0
+    maxconn     50000
+    user        haproxy
+    group       haproxy
+    daemon
+
+defaults
+    log                     global
+    mode                    tcp
+    option                  tcplog
+    option                  dontlognull
+    retries                 3
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+
+# -----------------------------------------------------------------------------
+# API Server (6443)
+# Rekordy DNS: api.{{ cluster_name }}.{{ base_domain }}
+#              api-int.{{ cluster_name }}.{{ base_domain }}
+# -----------------------------------------------------------------------------
+frontend api
+    bind *:6443
+    default_backend masters_api
+
+backend masters_api
+    balance roundrobin
+    option tcp-check
+{% for node in nodes | selectattr('role', 'equalto', 'master') | list %}
+    server {{ node.hostname }} {{ node.ip }}:6443 check inter 10s fall 3 rise 2
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Machine Config Server (22623) — potrzebny podczas instalacji i day-2
+# Rekord DNS: api-int.{{ cluster_name }}.{{ base_domain }}
+# -----------------------------------------------------------------------------
+frontend mcs
+    bind *:22623
+    default_backend masters_mcs
+
+backend masters_mcs
+    balance roundrobin
+    option tcp-check
+{% for node in nodes | selectattr('role', 'equalto', 'master') | list %}
+    server {{ node.hostname }} {{ node.ip }}:22623 check inter 10s fall 3 rise 2
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Ingress HTTPS (443)
+# Rekord DNS: *.apps.{{ cluster_name }}.{{ base_domain }}
+# -----------------------------------------------------------------------------
+{% set ingress_nodes = nodes | selectattr('role', 'equalto', 'worker') | list %}
+{% if ingress_nodes | length == 0 %}
+{% set ingress_nodes = nodes | selectattr('role', 'equalto', 'master') | list %}
+{% endif %}
+
+frontend ingress_https
+    bind *:443
+    default_backend workers_https
+
+backend workers_https
+    balance roundrobin
+    option tcp-check
+{% for node in ingress_nodes %}
+    server {{ node.hostname }} {{ node.ip }}:443 check inter 10s fall 3 rise 2
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Ingress HTTP (80)
+# Rekord DNS: *.apps.{{ cluster_name }}.{{ base_domain }}
+# -----------------------------------------------------------------------------
+frontend ingress_http
+    bind *:80
+    default_backend workers_http
+
+backend workers_http
+    balance roundrobin
+    option tcp-check
+{% for node in ingress_nodes %}
+    server {{ node.hostname }} {{ node.ip }}:80 check inter 10s fall 3 rise 2
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Stats (opcjonalnie)
+# Dostep: http://{{ haproxy.ip | default('haproxy') }}:9000/stats
+# -----------------------------------------------------------------------------
+frontend stats
+    bind *:9000
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats show-legends
+    stats admin if LOCALHOST
