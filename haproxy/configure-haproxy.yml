@@ -45,6 +45,7 @@
       loop:
         - 6443
         - 22623
+        - 22624
         - 9000
 
     - name: SELinux — zezwol HAProxy na polaczenia sieciowe
@@ -78,7 +79,8 @@
         immediate: true
       loop:
         - "6443"    # API Server
-        - "22623"   # Machine Config Server
+        - "22623"   # Machine Config Server HTTPS
+        - "22624"   # Machine Config Server HTTP
         - "443"     # Ingress HTTPS
         - "80"      # Ingress HTTP
         - "9000"    # Stats

@@ -37,7 +37,7 @@ backend masters_api
 {% endfor %}
 
 # -----------------------------------------------------------------------------
-# Machine Config Server (22623) — potrzebny podczas instalacji i day-2
+# Machine Config Server HTTPS (22623) — potrzebny podczas instalacji i day-2
 # Rekord DNS: api-int.{{ cluster_name }}.{{ base_domain }}
 # -----------------------------------------------------------------------------
 frontend mcs
@@ -49,6 +49,21 @@ backend masters_mcs
     option tcp-check
 {% for node in nodes | selectattr('role', 'equalto', 'master') | list %}
     server {{ node.hostname }} {{ node.ip }}:22623 check inter 10s fall 3 rise 2
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Machine Config Server HTTP (22624) — potrzebny podczas instalacji i day-2
+# Rekord DNS: api-int.{{ cluster_name }}.{{ base_domain }}
+# -----------------------------------------------------------------------------
+frontend mcs_http
+    bind *:22624
+    default_backend masters_mcs_http
+
+backend masters_mcs_http
+    balance roundrobin
+    option tcp-check
+{% for node in nodes | selectattr('role', 'equalto', 'master') | list %}
+    server {{ node.hostname }} {{ node.ip }}:22624 check inter 10s fall 3 rise 2
 {% endfor %}
 
 # -----------------------------------------------------------------------------
