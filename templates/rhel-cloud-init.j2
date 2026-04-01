@@ -14,11 +14,35 @@ users:
 chpasswd:
   expire: false
 
-# Podstawowe pakiety instalowane przy pierwszym boocie
 packages:
   - qemu-guest-agent
   - bash-completion
   - vim-enhanced
 
+# Konfiguracja NetworkManager dla drugiego interfejsu (Multus VLAN)
+# Bardziej niezawodne niz cloud-init network v2 na RHEL 9
+write_files:
+  - path: /etc/NetworkManager/system-connections/{{ vm_vlan_interface | default('enp2s0') }}.nmconnection
+    permissions: '0600'
+    owner: root:root
+    content: |
+      [connection]
+      id={{ vm_vlan_interface | default('enp2s0') }}
+      type=ethernet
+      interface-name={{ vm_vlan_interface | default('enp2s0') }}
+      autoconnect=true
+
+      [ethernet]
+
+      [ipv4]
+      method=manual
+      address1={{ vm_ip }}/{{ machine_network | ansible.utils.ipaddr('prefix') }},{{ gateway }}
+      dns={{ dns_servers | join(';') }};
+
+      [ipv6]
+      method=disabled
+
 runcmd:
   - systemctl enable --now qemu-guest-agent
+  - nmcli connection reload
+  - nmcli connection up "{{ vm_vlan_interface | default('enp2s0') }}" || true

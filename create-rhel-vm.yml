@@ -85,7 +85,6 @@
     - name: Przygotuj cloud-init userdata
       ansible.builtin.set_fact:
         _cloud_init_userdata: "{{ lookup('template', 'templates/rhel-cloud-init.j2') }}"
-        _cloud_init_networkdata: "{{ lookup('template', 'templates/rhel-network-config.j2') }}"
       when: existing_vm.resources | length == 0
 
     - name: Utworz VM

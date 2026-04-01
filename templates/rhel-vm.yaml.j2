@@ -92,4 +92,3 @@ spec:
         - name: cloudinit
           cloudInitNoCloud:
             userDataBase64: {{ _cloud_init_userdata | b64encode }}
-            networkDataBase64: {{ _cloud_init_networkdata | b64encode }}
