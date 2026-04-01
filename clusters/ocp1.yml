@@ -124,6 +124,8 @@ haproxy:
   cpu: 2
   memory: 4Gi
   disk_size: 30Gi
+  # vlan_interface: enp2s0   # nazwa interfejsu VLAN w goscie (domyslnie enp2s0)
+  #                          # sprawdz: virtctl console <vm> -n <ns> -> ip link show
 
 # -----------------------------------------------------------------------------
 # Opcje instalacji

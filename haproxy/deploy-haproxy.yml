@@ -53,6 +53,7 @@
     vm_cpu_sockets: "{{ haproxy.cpu | default(2) }}"
     vm_memory: "{{ haproxy.memory | default('4Gi') }}"
     vm_disk_size: "{{ haproxy.disk_size | default('30Gi') }}"
+    vm_vlan_interface: "{{ haproxy.vlan_interface | default('enp2s0') }}"
     vm_role: haproxy
 
 # ============================================================================
