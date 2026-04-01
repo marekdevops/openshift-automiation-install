@@ -1,5 +1,7 @@
 version: 2
 ethernets:
+  enp1s0:
+    dhcp4: true
   {{ node_interface_name | default('enp2s0') }}:
     dhcp4: false
     addresses:
