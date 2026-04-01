@@ -20,10 +20,10 @@ spec:
           http:
             url: "{{ rhel_image_url }}"
 {% elif rhel_image_pvc is defined %}
-        source:
-          pvc:
-            name: {{ rhel_image_pvc }}
-            namespace: {{ rhel_image_pvc_namespace | default(namespace) }}
+        sourceRef:
+          kind: DataSource
+          name: {{ rhel_image_pvc }}
+          namespace: {{ rhel_image_pvc_namespace | default('openshift-virtualization-os-images') }}
 {% endif %}
         storage:
           resources:
