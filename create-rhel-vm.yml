@@ -306,6 +306,11 @@
     # =========================================================================
     # Firewall
     # =========================================================================
+    - name: Zainstaluj firewalld
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
     - name: Wlacz i uruchom firewalld
       ansible.builtin.service:
         name: firewalld
@@ -318,7 +323,7 @@
         state: enabled
         permanent: true
         immediate: true
-        interface: "{{ node_interface_name | default('enp2s0') }}"
+        interface: "{{ vm_vlan_interface | default('enp2s0') }}"
       ignore_errors: true
 
     - name: Zezwol na SSH
