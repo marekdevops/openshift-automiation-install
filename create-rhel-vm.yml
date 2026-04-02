@@ -169,17 +169,11 @@
 
     - name: Pobierz certyfikat CA Satellite
       ansible.builtin.get_url:
-        url: "https://{{ satellite_url }}/pub/katello-server-ca.crt"
-        dest: /etc/pki/ca-trust/source/anchors/katello-server-ca.crt
+        url: "http://{{ satellite_url }}/pub/katello-server-ca.crt"
+        dest: /etc/rhsm/ca/katello-server-ca.pem
         validate_certs: false
         mode: "0644"
       when: _do_satellite | bool
-      notify: update ca trust
-
-    - name: Zaktualizuj zaufane certyfikaty
-      ansible.builtin.command: update-ca-trust
-      when: _do_satellite | bool
-      changed_when: true
 
     - name: Zarejestruj w Satellite
       community.general.redhat_subscription:
@@ -201,10 +195,6 @@
         msg: "satellite_activation_key nie ustawiony — pomijam rejestracje"
       when: not _do_satellite | bool
 
-  handlers:
-    - name: update ca trust
-      ansible.builtin.command: update-ca-trust
-      changed_when: true
 
 # ============================================================================
 # Play 3: Integracja z Active Directory
