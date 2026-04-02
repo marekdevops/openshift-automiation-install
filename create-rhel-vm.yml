@@ -182,8 +182,6 @@
           - register
           - "--org={{ satellite_org }}"
           - "--activationkey={{ satellite_activation_key }}"
-          - "--serverurl=https://{{ satellite_url }}/rhsm"
-          - "--baseurl=https://{{ satellite_url }}/pulp/repos"
           - "--force"
       when: _do_satellite | bool
       register: satellite_result
