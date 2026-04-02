@@ -23,7 +23,7 @@ spec:
         sourceRef:
           kind: DataSource
           name: {{ rhel_image_pvc }}
-          namespace: {{ rhel_image_pvc_namespace | default('openshift-virtualization-os-images') }}
+          namespace: {{ rhel_image_pvc_namespace | default(namespace) }}
 {% endif %}
         storage:
           resources:
