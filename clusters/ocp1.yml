@@ -124,8 +124,7 @@ haproxy:
   cpu: 2
   memory: 4Gi
   disk_size: 30Gi
-  # vlan_interface: enp2s0   # nazwa interfejsu VLAN w goscie (domyslnie enp2s0)
-  #                          # sprawdz: virtctl console <vm> -n <ns> -> ip link show
+  vlan_interface: eth1        # qcow2 RHEL image uzywa eth0/eth1 zamiast enp*s*
 
 # -----------------------------------------------------------------------------
 # Opcje instalacji
