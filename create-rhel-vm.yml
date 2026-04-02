@@ -167,12 +167,12 @@
       ansible.builtin.set_fact:
         _do_satellite: "{{ satellite_activation_key | default('') | length > 0 }}"
 
-    - name: Pobierz certyfikat CA Satellite
-      ansible.builtin.get_url:
-        url: "http://{{ satellite_url }}/pub/katello-server-ca.crt"
-        dest: /etc/rhsm/ca/katello-server-ca.pem
+    - name: Zainstaluj pakiet katello-ca-consumer z Satellite
+      ansible.builtin.dnf:
+        name: "http://{{ satellite_url }}/pub/katello-ca-consumer-latest.noarch.rpm"
+        state: present
+        disable_gpg_check: true
         validate_certs: false
-        mode: "0644"
       when: _do_satellite | bool
 
     - name: Zarejestruj w Satellite
