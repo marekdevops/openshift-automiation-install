@@ -124,7 +124,7 @@ haproxy:
   cpu: 2
   memory: 4Gi
   disk_size: 30Gi
-  vlan_interface: eth1        # qcow2 RHEL image uzywa eth0/eth1 zamiast enp*s*
+  vlan_interface: eth0        # jedyny NIC — qcow2 RHEL image uzywa eth zamiast enp*s*
 
 # -----------------------------------------------------------------------------
 # Opcje instalacji
