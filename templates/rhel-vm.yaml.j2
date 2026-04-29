@@ -69,9 +69,6 @@ spec:
                 bus: virtio
 
           interfaces:
-            - name: default
-              masquerade: {}
-              model: virtio
             - name: vlan214
               bridge: {}
               model: virtio
@@ -79,8 +76,6 @@ spec:
         resources: {}
 
       networks:
-        - name: default
-          pod: {}
         - name: vlan214
           multus:
             networkName: {{ multus_network }}

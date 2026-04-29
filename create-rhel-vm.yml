@@ -351,11 +351,11 @@
         line: 'PermitRootLogin no'
       notify: restart sshd
 
-    - name: Wymus uwierzytelnianie kluczem SSH
+    - name: Zezwol na logowanie haslem SSH
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication no'
+        line: 'PasswordAuthentication yes'
       notify: restart sshd
 
     - name: Wlacz automatyczne aktualizacje bezpieczenstwa (dnf-automatic)
