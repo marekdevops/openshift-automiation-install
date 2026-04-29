@@ -54,5 +54,19 @@ platform:
 fips: true
 {% endif %}
 
+{% if mirror_registry is defined %}
+imageDigestMirrors:
+  - mirrors:
+      - {{ mirror_registry }}/openshift/release-images
+    source: quay.io/openshift-release-dev/ocp-release
+  - mirrors:
+      - {{ mirror_registry }}/openshift/release
+    source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+{% endif %}
+
 pullSecret: '{{ lookup("file", pull_secret_file) | trim }}'
 sshKey: '{{ lookup("file", ssh_public_key_file) | trim }}'
+{% if mirror_registry is defined and mirror_registry_ca is defined %}
+additionalTrustBundle: |
+{{ lookup('file', mirror_registry_ca) | indent(2, true) }}
+{% endif %}

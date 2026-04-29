@@ -127,6 +127,12 @@ haproxy:
   vlan_interface: eth0        # jedyny NIC — qcow2 RHEL image uzywa eth zamiast enp*s*
 
 # -----------------------------------------------------------------------------
+# Mirror registry (opcjonalne — wypelnij gdy brak dostepu do quay.io)
+# -----------------------------------------------------------------------------
+# mirror_registry: <HOSTNAME-BASTIONU>:8443
+# mirror_registry_ca: /path/to/mirror-ca.crt
+
+# -----------------------------------------------------------------------------
 # Opcje instalacji
 # -----------------------------------------------------------------------------
 single_node: false
