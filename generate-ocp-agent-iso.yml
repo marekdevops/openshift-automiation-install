@@ -183,6 +183,13 @@
       ansible.builtin.debug:
         msg: "Generuję agent.x86_64.iso... (to może potrwać kilka minut)"
 
+    - name: Zapisz kopię install-config.yaml przed konsumpcją
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/install-config.yaml"
+        dest: "{{ install_dir }}/install-config.yaml.bak"
+        remote_src: true
+        mode: '0600'
+
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
         cmd: "{{ openshift_install_binary }} agent create image --dir={{ install_dir }}"
