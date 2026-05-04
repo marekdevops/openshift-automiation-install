@@ -193,6 +193,7 @@
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
         cmd: "{{ openshift_install_binary }} agent create image --dir={{ install_dir }}"
+      environment: "{{ {'OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE': mirror_registry + '/openshift/release-images:' + ocp_release_tag} if mirror_registry is defined else {} }}"
       register: create_image_result
       changed_when: true
 

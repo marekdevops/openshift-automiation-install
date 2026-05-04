@@ -131,6 +131,7 @@ haproxy:
 # -----------------------------------------------------------------------------
 # mirror_registry: <HOSTNAME-BASTIONU>:8443
 # mirror_registry_ca: /path/to/mirror-ca.crt
+# ocp_release_tag: 4.21.7-x86_64
 
 # -----------------------------------------------------------------------------
 # Opcje instalacji
