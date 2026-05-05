@@ -18,13 +18,23 @@ hosts:
   - hostname: {{ node.hostname }}
     role: {{ node.role }}
     interfaces:
-      - name: enp1s0
+      - name: enp2s0
         macAddress: {{ node.mac }}
     rootDeviceHints:
       deviceName: {{ node.root_disk | default('/dev/vda') }}
     networkConfig:
       interfaces:
         - name: enp1s0
+          type: ethernet
+          state: up
+          ipv4:
+            enabled: true
+            dhcp: true
+            auto-dns: false
+            auto-routes: false
+          ipv6:
+            enabled: false
+        - name: enp2s0
           type: ethernet
           state: up
           mac-address: {{ node.mac }}
@@ -46,6 +56,6 @@ hosts:
         config:
           - destination: 0.0.0.0/0
             next-hop-address: {{ gateway }}
-            next-hop-interface: enp1s0
+            next-hop-interface: enp2s0
             table-id: 254
 {% endfor %}
