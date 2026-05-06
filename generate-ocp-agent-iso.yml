@@ -132,20 +132,6 @@
         dest: "{{ install_dir }}/agent-config.yaml"
         mode: '0600'
 
-    - name: Utwórz katalog manifests
-      ansible.builtin.file:
-        path: "{{ install_dir }}/manifests"
-        state: directory
-        mode: '0755'
-      when: mirror_registry is defined
-
-    - name: Wygeneruj MachineConfig z blocked=true dla mirror registry
-      ansible.builtin.template:
-        src: templates/machineconfig-mirror.yaml.j2
-        dest: "{{ install_dir }}/manifests/99-mirror-registries.yaml"
-        mode: '0600'
-      when: mirror_registry is defined
-
     - name: Pokaż wygenerowany install-config.yaml (bez secretów)
       ansible.builtin.shell: |
         cat {{ install_dir }}/install-config.yaml | grep -v pullSecret | grep -v sshKey
@@ -203,6 +189,57 @@
         dest: "{{ install_dir }}/install-config.yaml.bak"
         remote_src: true
         mode: '0600'
+
+    - name: "=== PATCH REGISTRIES.CONF — blocked=true dla mirror ==="
+      ansible.builtin.debug:
+        msg: "Generuję manifesty pośrednie i patchuję registries.conf..."
+      when: mirror_registry is defined
+
+    - name: Wygeneruj manifesty pośrednie (create manifests)
+      ansible.builtin.command:
+        cmd: "{{ openshift_install_binary }} agent create manifests --dir={{ install_dir }}"
+      environment: "{{ {'OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE': mirror_registry + '/openshift/release-images:' + ocp_release_tag} if mirror_registry is defined else {} }}"
+      when: mirror_registry is defined
+      changed_when: true
+
+    - name: Znajdź registries.conf w wygenerowanych manifestach
+      ansible.builtin.find:
+        paths: "{{ install_dir }}"
+        patterns: "registries.conf"
+        recurse: yes
+        file_type: file
+      register: found_registries
+      when: mirror_registry is defined
+
+    - name: Pokaż znalezione pliki registries.conf
+      ansible.builtin.debug:
+        msg: "Znalezione pliki: {{ found_registries.files | map(attribute='path') | list }}"
+      when: mirror_registry is defined
+
+    - name: Dodaj blocked=true do registries.conf dla quay.io
+      ansible.builtin.shell: |
+        python3 - << 'PYEOF'
+        import re
+        path = "{{ item.path }}"
+        with open(path) as f:
+            content = f.read()
+        if 'quay.io/openshift-release-dev' not in content:
+            print(f"Pominięto {path} — brak wpisów quay.io/openshift-release-dev")
+            exit(0)
+        # Dodaj blocked = true po linii location = "quay.io/..." w sekcji [[registry]]
+        # (2-spacje indent = [[registry]], 4-spacje = [[registry.mirror]] — nie dotykamy)
+        patched = re.sub(
+            r'(  location = "quay\.io/openshift-release-dev/[^"]+"\n)(?!  blocked)',
+            r'\1  blocked = true\n',
+            content
+        )
+        with open(path, 'w') as f:
+            f.write(patched)
+        print(f"Patchowano: {path}")
+        PYEOF
+      loop: "{{ found_registries.files | default([]) }}"
+      when: mirror_registry is defined and found_registries.files | default([]) | length > 0
+      changed_when: true
 
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
