@@ -62,14 +62,46 @@
         msg: "Uploaduję {{ iso_file }} do DataVolume {{ iso_pvc_name }}..."
       when: iso_dv_info.resources | length == 0
 
-    - name: Upload ISO do DataVolume przez virtctl
+    - name: Utwórz DataVolume dla ISO z source upload
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cdi.kubevirt.io/v1beta1
+          kind: DataVolume
+          metadata:
+            name: "{{ iso_pvc_name }}"
+            namespace: "{{ namespace }}"
+            annotations:
+              cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+          spec:
+            source:
+              upload: {}
+            storage:
+              accessModes:
+                - ReadWriteMany
+              resources:
+                requests:
+                  storage: 2Gi
+      when: iso_dv_info.resources | length == 0
+
+    - name: Poczekaj aż CDI utworzy PVC
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+      register: pvc_status
+      until: pvc_status.resources | length > 0
+      retries: 30
+      delay: 5
+      when: iso_dv_info.resources | length == 0
+
+    - name: Upload ISO do PVC przez virtctl
       ansible.builtin.command:
         cmd: >
-          virtctl image-upload dv {{ iso_pvc_name }}
-          --size=2Gi
+          virtctl image-upload pvc {{ iso_pvc_name }}
           --image-path={{ iso_file }}
           -n {{ namespace }}
-          --access-mode=ReadWriteMany
           --insecure
       when: iso_dv_info.resources | length == 0
       register: upload_result
