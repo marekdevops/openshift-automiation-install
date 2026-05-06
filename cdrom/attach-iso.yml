@@ -63,14 +63,14 @@
       when: iso_dv_info.resources | length == 0
 
     - name: Utwórz DataVolume dla ISO z source upload
-      kubernetes.core.k8s:
-        state: present
-        definition:
+      ansible.builtin.shell:
+        cmd: |
+          oc apply -n {{ namespace }} -f - <<EOF
           apiVersion: cdi.kubevirt.io/v1beta1
           kind: DataVolume
           metadata:
-            name: "{{ iso_pvc_name }}"
-            namespace: "{{ namespace }}"
+            name: {{ iso_pvc_name }}
+            namespace: {{ namespace }}
             annotations:
               cdi.kubevirt.io/storage.bind.immediate.requested: "true"
           spec:
@@ -82,6 +82,7 @@
               resources:
                 requests:
                   storage: 2Gi
+          EOF
       when: iso_dv_info.resources | length == 0
 
     - name: Poczekaj aż CDI utworzy PVC
