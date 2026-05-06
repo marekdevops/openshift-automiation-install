@@ -132,6 +132,20 @@
         dest: "{{ install_dir }}/agent-config.yaml"
         mode: '0600'
 
+    - name: Utwórz katalog manifests
+      ansible.builtin.file:
+        path: "{{ install_dir }}/manifests"
+        state: directory
+        mode: '0755'
+      when: mirror_registry is defined
+
+    - name: Wygeneruj MachineConfig z blocked=true dla mirror registry
+      ansible.builtin.template:
+        src: templates/machineconfig-mirror.yaml.j2
+        dest: "{{ install_dir }}/manifests/99-mirror-registries.yaml"
+        mode: '0600'
+      when: mirror_registry is defined
+
     - name: Pokaż wygenerowany install-config.yaml (bez secretów)
       ansible.builtin.shell: |
         cat {{ install_dir }}/install-config.yaml | grep -v pullSecret | grep -v sshKey
