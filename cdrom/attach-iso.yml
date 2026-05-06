@@ -85,15 +85,17 @@
           EOF
       when: iso_dv_info.resources | length == 0
 
-    - name: Poczekaj aż CDI utworzy PVC
+    - name: Poczekaj aż CDI przygotuje proxy do uploadu (faza UploadReady)
       kubernetes.core.k8s_info:
-        api_version: v1
-        kind: PersistentVolumeClaim
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
         namespace: "{{ namespace }}"
         name: "{{ iso_pvc_name }}"
-      register: pvc_status
-      until: pvc_status.resources | length > 0
-      retries: 30
+      register: dv_upload_status
+      until: >
+        dv_upload_status.resources | length > 0 and
+        dv_upload_status.resources[0].status.phase | default('') == 'UploadReady'
+      retries: 36
       delay: 5
       when: iso_dv_info.resources | length == 0
 
