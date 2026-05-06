@@ -202,32 +202,23 @@
       when: mirror_registry is defined
       changed_when: true
 
-    - name: Znajdź registries.conf w wygenerowanych manifestach
-      ansible.builtin.find:
-        paths: "{{ install_dir }}"
-        patterns: "registries.conf"
-        recurse: yes
-        file_type: file
-      register: found_registries
+    - name: Sprawdź czy registries.conf zostało wygenerowane
+      ansible.builtin.stat:
+        path: "{{ install_dir }}/mirror/registries.conf"
+      register: registries_conf_stat
       when: mirror_registry is defined
 
-    - name: Pokaż znalezione pliki registries.conf
-      ansible.builtin.debug:
-        msg: "Znalezione pliki: {{ found_registries.files | map(attribute='path') | list }}"
-      when: mirror_registry is defined
-
-    - name: Dodaj blocked=true do registries.conf dla quay.io
+    - name: Dodaj blocked=true do mirror/registries.conf
       ansible.builtin.shell: |
         python3 - << 'PYEOF'
         import re
-        path = "{{ item.path }}"
+        path = "{{ install_dir }}/mirror/registries.conf"
         with open(path) as f:
             content = f.read()
-        if 'quay.io/openshift-release-dev' not in content:
-            print(f"Pominięto {path} — brak wpisów quay.io/openshift-release-dev")
-            exit(0)
-        # Dodaj blocked = true po linii location = "quay.io/..." w sekcji [[registry]]
-        # (2-spacje indent = [[registry]], 4-spacje = [[registry.mirror]] — nie dotykamy)
+        print("=== Przed patchem ===")
+        print(content)
+        # Dodaj blocked = true po linii location w sekcji [[registry]] (2-spacje indent)
+        # [[registry.mirror]] ma 4-spacje indent — nie dotykamy
         patched = re.sub(
             r'(  location = "quay\.io/openshift-release-dev/[^"]+"\n)(?!  blocked)',
             r'\1  blocked = true\n',
@@ -235,11 +226,16 @@
         )
         with open(path, 'w') as f:
             f.write(patched)
-        print(f"Patchowano: {path}")
+        print("=== Po patchu ===")
+        print(patched)
         PYEOF
-      loop: "{{ found_registries.files | default([]) }}"
-      when: mirror_registry is defined and found_registries.files | default([]) | length > 0
+      when: mirror_registry is defined and registries_conf_stat.stat.exists
       changed_when: true
+
+    - name: Ostrzeżenie — brak mirror/registries.conf
+      ansible.builtin.debug:
+        msg: "UWAGA: mirror/registries.conf nie istnieje — patch blocked=true pominięty. Sprawdź wersję openshift-install."
+      when: mirror_registry is defined and not registries_conf_stat.stat.exists
 
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
