@@ -190,59 +190,150 @@
         remote_src: true
         mode: '0600'
 
-    - name: "=== PATCH REGISTRIES.CONF — blocked=true dla mirror ==="
-      ansible.builtin.debug:
-        msg: "Generuję manifesty pośrednie i patchuję registries.conf..."
-      when: mirror_registry is defined
-
-    - name: Wygeneruj manifesty pośrednie (create manifests)
-      ansible.builtin.command:
-        cmd: "{{ openshift_install_binary }} agent create manifests --dir={{ install_dir }}"
-      environment: "{{ {'OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE': mirror_registry + '/openshift/release-images:' + ocp_release_tag} if mirror_registry is defined else {} }}"
-      when: mirror_registry is defined
-      changed_when: true
-
-    - name: Sprawdź czy registries.conf zostało wygenerowane
-      ansible.builtin.stat:
-        path: "{{ install_dir }}/mirror/registries.conf"
-      register: registries_conf_stat
-      when: mirror_registry is defined
-
-    - name: Dodaj blocked=true do mirror/registries.conf
-      ansible.builtin.shell: |
-        python3 - << 'PYEOF'
-        import re
-        path = "{{ install_dir }}/mirror/registries.conf"
-        with open(path) as f:
-            content = f.read()
-        print("=== Przed patchem ===")
-        print(content)
-        # Dodaj blocked = true po linii location w sekcji [[registry]] (2-spacje indent)
-        # [[registry.mirror]] ma 4-spacje indent — nie dotykamy
-        patched = re.sub(
-            r'(  location = "quay\.io/openshift-release-dev/[^"]+"\n)(?!  blocked)',
-            r'\1  blocked = true\n',
-            content
-        )
-        with open(path, 'w') as f:
-            f.write(patched)
-        print("=== Po patchu ===")
-        print(patched)
-        PYEOF
-      when: mirror_registry is defined and registries_conf_stat.stat.exists
-      changed_when: true
-
-    - name: Ostrzeżenie — brak mirror/registries.conf
-      ansible.builtin.debug:
-        msg: "UWAGA: mirror/registries.conf nie istnieje — patch blocked=true pominięty. Sprawdź wersję openshift-install."
-      when: mirror_registry is defined and not registries_conf_stat.stat.exists
-
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
         cmd: "{{ openshift_install_binary }} agent create image --dir={{ install_dir }}"
       environment: "{{ {'OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE': mirror_registry + '/openshift/release-images:' + ocp_release_tag} if mirror_registry is defined else {} }}"
       register: create_image_result
       changed_when: true
+
+    # =========================================================================
+    # Patch ISO — wstrzyknięcie blocked=true do registries.conf w ignition
+    # Robimy to PO generate, bo openshift-install regeneruje registries.conf
+    # wewnętrznie i nadpisałby każdy wcześniejszy patch.
+    # =========================================================================
+    - name: "=== PATCH ISO — blocked=true w registries.conf (mirror) ==="
+      ansible.builtin.debug:
+        msg: "Patchuję registries.conf wewnątrz ISO aby wymusić mirror i zablokować quay.io..."
+      when: mirror_registry is defined
+
+    - name: Sprawdź czy coreos-installer jest dostępny
+      ansible.builtin.command:
+        cmd: which coreos-installer
+      register: coreos_installer_which
+      failed_when: false
+      changed_when: false
+      when: mirror_registry is defined
+
+    - name: Pobierz coreos-installer jeśli brak
+      ansible.builtin.get_url:
+        url: "https://mirror.openshift.com/pub/openshift-v4/clients/coreos-installer/latest/coreos-installer_amd64"
+        dest: /usr/local/bin/coreos-installer
+        mode: '0755'
+      when: mirror_registry is defined and coreos_installer_which.rc != 0
+      become: true
+
+    - name: Ustaw ścieżkę do coreos-installer
+      ansible.builtin.set_fact:
+        coreos_installer_bin: "{{ coreos_installer_which.stdout | default('/usr/local/bin/coreos-installer', true) | trim }}"
+      when: mirror_registry is defined
+
+    - name: Wyeksportuj ignition z ISO do pliku
+      ansible.builtin.shell:
+        cmd: "{{ coreos_installer_bin }} iso ignition show {{ install_dir }}/agent.x86_64.iso > {{ install_dir }}/original-ignition.json"
+      changed_when: false
+      when: mirror_registry is defined
+
+    - name: Patch registries.conf w ignition — dodaj blocked=true
+      ansible.builtin.shell: |
+        python3 << 'PYEOF'
+        import json, base64, re, sys
+        from urllib.parse import unquote, quote
+
+        with open("{{ install_dir }}/original-ignition.json") as f:
+            ignition = json.load(f)
+
+        patched_count = 0
+        for storage in ignition.get('storage', {}).get('files', []):
+            path = storage.get('path', '')
+            if 'registries.conf' not in path:
+                continue
+            contents = storage.get('contents', {})
+            src = contents.get('source', '')
+            if not src.startswith('data:'):
+                continue
+            # Dekoduj: data:;base64,<base64> lub data:,<url-encoded>
+            if ';base64,' in src:
+                header, encoded = src.split(';base64,', 1)
+                decoded = base64.b64decode(encoded).decode('utf-8')
+            else:
+                header, encoded = src.split(',', 1)
+                decoded = unquote(encoded)
+
+            print(f"=== registries.conf przed patchem ({path}) ===", file=sys.stderr)
+            print(decoded, file=sys.stderr)
+
+            # Dodaj blocked = true po linii location w sekcji [[registry]]
+            # [[registry.mirror]] ma 4-spacje indent — nie dotykamy
+            patched = re.sub(
+                r'(  location = "quay\.io/[^\n]+"\n)(?!\s*blocked)',
+                r'\1  blocked = true\n',
+                decoded
+            )
+
+            print(f"=== registries.conf po patchu ({path}) ===", file=sys.stderr)
+            print(patched, file=sys.stderr)
+
+            if ';base64,' in src:
+                new_src = header + ';base64,' + base64.b64encode(patched.encode('utf-8')).decode('ascii')
+            else:
+                new_src = header + ',' + quote(patched)
+
+            contents['source'] = new_src
+            patched_count += 1
+
+        if patched_count == 0:
+            print("UWAGA: nie znaleziono registries.conf w ignition!", file=sys.stderr)
+            sys.exit(1)
+
+        with open("{{ install_dir }}/patched-ignition.json", 'w') as f:
+            json.dump(ignition, f)
+
+        print(f"Patchowano {patched_count} plik(ów) registries.conf w ignition.")
+        PYEOF
+      when: mirror_registry is defined
+      changed_when: true
+
+    - name: Wstrzyknij patchowany ignition do ISO
+      ansible.builtin.command:
+        cmd: >
+          {{ coreos_installer_bin }} iso ignition embed
+          --force
+          --ignition-file {{ install_dir }}/patched-ignition.json
+          {{ install_dir }}/agent.x86_64.iso
+      when: mirror_registry is defined
+      changed_when: true
+
+    - name: Weryfikacja — pokaż registries.conf z patchowanego ISO
+      ansible.builtin.shell: |
+        {{ coreos_installer_bin }} iso ignition show {{ install_dir }}/agent.x86_64.iso > {{ install_dir }}/verify-ignition.json
+        python3 << 'PYEOF'
+        import json, base64
+        from urllib.parse import unquote
+
+        with open("{{ install_dir }}/verify-ignition.json") as f:
+            ignition = json.load(f)
+
+        for storage in ignition.get('storage', {}).get('files', []):
+            path = storage.get('path', '')
+            if 'registries.conf' not in path:
+                continue
+            src = storage.get('contents', {}).get('source', '')
+            if ';base64,' in src:
+                decoded = base64.b64decode(src.split(';base64,', 1)[1]).decode('utf-8')
+            else:
+                decoded = unquote(src.split(',', 1)[1])
+            print(f"=== {path} ===")
+            print(decoded)
+        PYEOF
+      changed_when: false
+      when: mirror_registry is defined
+      register: verify_result
+
+    - name: Pokaż wynik weryfikacji registries.conf
+      ansible.builtin.debug:
+        msg: "{{ verify_result.stdout_lines }}"
+      when: mirror_registry is defined
 
     - name: Sprawdź czy ISO zostało utworzone
       ansible.builtin.stat:
