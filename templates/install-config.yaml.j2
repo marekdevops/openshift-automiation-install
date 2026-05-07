@@ -56,6 +56,7 @@ fips: true
 
 {% if mirror_registry is defined %}
 imageDigestMirrors:
+  # --- OpenShift Release & Payload ---
   - mirrors:
       - {{ mirror_registry }}/openshift/release-images
     source: quay.io/openshift-release-dev/ocp-release
@@ -64,10 +65,19 @@ imageDigestMirrors:
       - {{ mirror_registry }}/openshift/release
     source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
     mirrorSourcePolicy: NeverContactSource
+
+  # --- Agent-based Installer (Assisted Service) ---
+  # Nawet w 4.21 niektore komponenty moga szukac w quay.io
   - mirrors:
       - {{ mirror_registry }}/edge-infrastructure
     source: quay.io/edge-infrastructure
     mirrorSourcePolicy: NeverContactSource
+  - mirrors:
+      - {{ mirror_registry }}/multicluster-engine
+    source: registry.redhat.io/multicluster-engine
+    mirrorSourcePolicy: NeverContactSource
+  
+  # --- Dodatkowe wymagane rejestry ---
   - mirrors:
       - {{ mirror_registry }}/openshift4
     source: registry.redhat.io/openshift4
