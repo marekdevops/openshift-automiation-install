@@ -64,6 +64,14 @@ imageDigestMirrors:
       - {{ mirror_registry }}/openshift/release
     source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
     mirrorSourcePolicy: NeverContactSource
+  - mirrors:
+      - {{ mirror_registry }}/edge-infrastructure
+    source: quay.io/edge-infrastructure
+    mirrorSourcePolicy: NeverContactSource
+  - mirrors:
+      - {{ mirror_registry }}/ocp-v4.0-art-dev
+    source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+    mirrorSourcePolicy: NeverContactSource
 {% endif %}
 
 pullSecret: '{{ lookup("file", pull_secret_file) | trim }}'

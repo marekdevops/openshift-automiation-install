@@ -264,9 +264,11 @@
             print(decoded, file=sys.stderr)
 
             # Dodaj blocked = true po linii location w sekcji [[registry]]
-            # [[registry.mirror]] ma 4-spacje indent — nie dotykamy
+            # Dodatkowo zmien mirror-by-digest-only na false, aby umozliwic sciaganie po tagach w air-gap
+            decoded = decoded.replace('mirror-by-digest-only = true', 'mirror-by-digest-only = false')
+
             patched = re.sub(
-                r'(  location = "quay\.io/[^\n]+"\n)(?!\s*blocked)',
+                r'(location = "(?:quay\.io|registry\.redhat\.io|mirror\.openshift\.com)/[^\n]+"\n)(?!\s*blocked)',
                 r'\1  blocked = true\n',
                 decoded
             )
