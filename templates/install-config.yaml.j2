@@ -69,8 +69,16 @@ imageDigestMirrors:
     source: quay.io/edge-infrastructure
     mirrorSourcePolicy: NeverContactSource
   - mirrors:
-      - {{ mirror_registry }}/ocp-v4.0-art-dev
-    source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+      - {{ mirror_registry }}/openshift4
+    source: registry.redhat.io/openshift4
+    mirrorSourcePolicy: NeverContactSource
+  - mirrors:
+      - {{ mirror_registry }}/rhcos7
+    source: registry.redhat.io/rhcos7
+    mirrorSourcePolicy: NeverContactSource
+  - mirrors:
+      - {{ mirror_registry }}/docker-io
+    source: docker.io
     mirrorSourcePolicy: NeverContactSource
 {% endif %}
 

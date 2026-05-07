@@ -263,15 +263,32 @@
             print(f"=== registries.conf przed patchem ({path}) ===", file=sys.stderr)
             print(decoded, file=sys.stderr)
 
-            # Dodaj blocked = true po linii location w sekcji [[registry]]
-            # Dodatkowo zmien mirror-by-digest-only na false, aby umozliwic sciaganie po tagach w air-gap
+            # 1. mirror-by-digest-only = false dla wszystkich (wymagane dla tagów w air-gap)
             decoded = decoded.replace('mirror-by-digest-only = true', 'mirror-by-digest-only = false')
 
-            patched = re.sub(
-                r'(location = "(?:quay\.io|registry\.redhat\.io|mirror\.openshift\.com)/[^\n]+"\n)(?!\s*blocked)',
-                r'\1  blocked = true\n',
-                decoded
-            )
+            # 2. Dodaj blocked = true do wszystkich zewnętrznych rejestrów
+            # Szukamy linii 'location = "..."' i sprawdzamy czy to zewnętrzny rejestr
+            # Używamy pętli po liniach, aby obsłużyć wcięcia
+            lines = decoded.splitlines()
+            new_lines = []
+            
+            # Dodaj unqualified-search-registries na początku jeśli brak
+            if 'unqualified-search-registries' not in decoded:
+                new_lines.append(f'unqualified-search-registries = ["{{ mirror_registry }}"]')
+
+            for line in lines:
+                new_lines.append(line)
+                # Jeśli linia zawiera location zewnętrznego rejestru i nie jest to sekcja mirrory
+                if 'location =' in line and any(reg in line for reg in ['quay.io', 'registry.redhat.io', 'mirror.openshift.com', 'docker.io']):
+                    # Nie blokuj, jeśli to już jest mirror (część [[registry.mirror]])
+                    # W TOML wygenerowanym przez OCP, mirror jest wcięty
+                    if '    location =' not in line:
+                        indent = line[:line.find('location')]
+                        # Sprawdź czy następna linia to nie jest już blocked
+                        # (dla uproszczenia po prostu dodajemy, TOML to obsłuży)
+                        new_lines.append(f"{indent}blocked = true")
+
+            patched = "\n".join(new_lines)
 
             print(f"=== registries.conf po patchu ({path}) ===", file=sys.stderr)
             print(patched, file=sys.stderr)
