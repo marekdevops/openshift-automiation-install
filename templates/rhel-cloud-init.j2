@@ -1,0 +1,48 @@
+#cloud-config
+hostname: {{ vm_hostname }}
+fqdn: {{ vm_hostname }}.{{ base_domain }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ ssh_user | default('cloud-user') }}
+    groups: wheel
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ lookup('file', ssh_public_key_file | default('~/.ssh/id_ed25519.pub')) | trim }}
+
+chpasswd:
+  expire: false
+
+packages:
+  - qemu-guest-agent
+  - bash-completion
+  - vim-enhanced
+
+# Konfiguracja NetworkManager dla drugiego interfejsu (Multus VLAN)
+# Bardziej niezawodne niz cloud-init network v2 na RHEL 9
+write_files:
+  - path: /etc/NetworkManager/system-connections/{{ vm_vlan_interface | default('enp2s0') }}.nmconnection
+    permissions: '0600'
+    owner: root:root
+    content: |
+      [connection]
+      id={{ vm_vlan_interface | default('enp2s0') }}
+      type=ethernet
+      interface-name={{ vm_vlan_interface | default('enp2s0') }}
+      autoconnect=true
+
+      [ethernet]
+
+      [ipv4]
+      method=manual
+      address1={{ vm_ip }}/{{ machine_network | ansible.utils.ipaddr('prefix') }},{{ gateway }}
+      dns={{ dns_servers | join(';') }};
+
+      [ipv6]
+      method=disabled
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - nmcli connection reload
+  - nmcli connection up "{{ vm_vlan_interface | default('enp2s0') }}" || true

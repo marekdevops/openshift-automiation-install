@@ -219,19 +219,6 @@ single_node: false
 fips_enabled: false
 ```
 
-## Air-Gapped Installation
-
-For environments without internet access, you can provide a local RHCOS ISO:
-
-```yaml
-# In cluster config
-rhcos_iso_path: /path/to/rhcos-live.x86_64.iso
-```
-
-Download RHCOS ISO from [mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/](https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/)
-
-**Note:** For fully air-gapped environments, you also need a mirror registry with OCP release images. The simplest approach is to generate the agent ISO on a connected host and transfer it.
-
 ## DNS Requirements
 
 Configure DNS before installation:
@@ -271,7 +258,7 @@ For F5/HAProxy, configure pools:
 
 - **CPU**: Host-passthrough model with hotplug support
 - **Memory**: Hotplug support (configurable max)
-- **Network**: Dual NIC (pod network + Multus VLAN), IPv4 only
+- **Network**: Single NIC (Multus VLAN bridge), IPv4 only
 - **Storage**: VirtIO disk with multiqueue
 - **Migration**: Live migration support (requires RWX storage)
 

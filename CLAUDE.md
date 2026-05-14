@@ -94,9 +94,6 @@ dns_servers:
   - 192.168.214.1
 ntp_servers:
   - 192.168.214.1
-
-# Air-gapped: local RHCOS ISO
-# rhcos_iso_path: /path/to/rhcos-live.x86_64.iso
 ```
 
 **Playbook options:**
@@ -111,7 +108,6 @@ ntp_servers:
 - **IaC approach**: Single config file per cluster in `clusters/`
 - **Auto MAC population**: `create-virt-env.yml` saves MAC addresses back to config
 - **External LB support**: `external_lb: true` uses `platform: none` (no VIPs required)
-- **Air-gapped support**: `rhcos_iso_path` for local RHCOS ISO
 - **DataVolume for ISO**: Uses DataVolume (not PVC) with ReadWriteMany for live migration
 - **IPv4 only**: IPv6 explicitly disabled in network config
 - **Protection**: `delete-virt-env.yml` requires `-e remove=yes` to delete
@@ -128,6 +124,6 @@ ntp_servers:
 ## Conventions
 
 - Playbooks use active OpenShift context (oc login)
-- VMs use: host-passthrough CPU, hotplug CPU/RAM, dual NIC (pod + Multus VLAN)
+- VMs use: host-passthrough CPU, hotplug CPU/RAM, single NIC (Multus VLAN bridge)
 - ISO stored as DataVolume with ReadWriteMany access mode
 - Comments in playbooks are in Polish
