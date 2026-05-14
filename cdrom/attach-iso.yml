@@ -12,7 +12,8 @@
 # Co robi:
 #   1. Uploaduje ISO do PVC (jeśli nie istnieje)
 #   2. Podpina CDROM do każdej VM
-#   3. Ustawia boot order: CDROM pierwszy
+#   3. Ustawia boot order: rootdisk pierwszy, CDROM drugi
+#      (pusty rootdisk → BIOS fallback do CDROM → instalacja → reboot z rootdisk)
 #   4. Restartuje VM
 # =============================================================================
 
@@ -146,8 +147,8 @@
         cmd: >
           oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
             {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
-              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 2},
-              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 1}
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 2}
             ]},
             {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
               {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},
@@ -165,7 +166,7 @@
     # =========================================================================
     - name: "=== URUCHAMIANIE VM ==="
       ansible.builtin.debug:
-        msg: "Uruchamiam VM z bootem z CDROM..."
+        msg: "Uruchamiam VM — pusty rootdisk fallbackuje do CDROM, agent installer zapisze na rootdisk..."
 
     - name: Uruchom VM
       kubernetes.core.k8s:
