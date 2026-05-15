@@ -122,6 +122,23 @@
         dest: "{{ install_dir }}/install-config.yaml"
         mode: '0600'
 
+    # Walidacja przed renderem agent-config — kazdy node musi miec
+    # niepusty mac i ip. To gwarancja ze wyrenderowany nmstate
+    # bedzie kompletny (brak macAddress / ip wali install).
+    - name: Walidacja — kazdy node ma niepuste mac i ip
+      ansible.builtin.assert:
+        that:
+          - item.mac is defined and item.mac | length > 0
+          - item.ip is defined and item.ip | length > 0
+        fail_msg: |
+          Node {{ item.name | default('?') }} ma puste mac/ip:
+            mac: '{{ item.mac | default("UNSET") }}'
+            ip:  '{{ item.ip | default("UNSET") }}'
+          Sprawdz clusters/{{ cluster_name }}.yml lub uruchom create-virt-env.yml.
+      loop: "{{ nodes_with_mac | default(nodes) }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
+
     - name: Wygeneruj agent-config.yaml
       ansible.builtin.template:
         src: templates/agent-config.yaml.j2
@@ -138,6 +155,16 @@
       ansible.builtin.debug:
         msg: "{{ install_config_preview.stdout_lines }}"
 
+    - name: Pokaz wyrenderowany agent-config.yaml (do diagnostyki)
+      ansible.builtin.command:
+        cmd: "cat {{ install_dir }}/agent-config.yaml"
+      register: agent_config_preview
+      changed_when: false
+
+    - name: Preview agent-config.yaml
+      ansible.builtin.debug:
+        msg: "{{ agent_config_preview.stdout_lines }}"
+
     # =========================================================================
     # Krok 5: Wygeneruj ISO
     # =========================================================================
@@ -145,19 +172,12 @@
       ansible.builtin.debug:
         msg: "Generuję agent.x86_64.iso... (to może potrwać kilka minut)"
 
-    - name: Zapisz kopię install-config.yaml przed konsumpcją
-      ansible.builtin.copy:
-        src: "{{ install_dir }}/install-config.yaml"
-        dest: "{{ install_dir }}/install-config.yaml.bak"
-        remote_src: true
-        mode: '0600'
-
-    - name: Zapisz kopię agent-config.yaml przed konsumpcją (do diagnostyki)
-      ansible.builtin.copy:
-        src: "{{ install_dir }}/agent-config.yaml"
-        dest: "{{ install_dir }}/agent-config.yaml.bak"
-        remote_src: true
-        mode: '0600'
+    - name: Backup install-config.yaml + agent-config.yaml (przed konsumpcja przez openshift-install)
+      ansible.builtin.shell: |
+        cp -f "{{ install_dir }}/install-config.yaml" "{{ install_dir }}/install-config.yaml.bak"
+        cp -f "{{ install_dir }}/agent-config.yaml"   "{{ install_dir }}/agent-config.yaml.bak"
+        chmod 600 "{{ install_dir }}/install-config.yaml.bak" "{{ install_dir }}/agent-config.yaml.bak"
+      changed_when: true
 
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
