@@ -24,28 +24,36 @@
 
   vars:
     install_dir: "/tmp/ocp-install/{{ cluster_name }}"
-    iso_file: "{{ install_dir }}/agent.x86_64.iso"
 
   tasks:
     # =========================================================================
-    # Krok 1: Walidacja
+    # Krok 1: Walidacja — znajdz wygenerowane ISO (dowolna nazwa agent*.iso)
     # =========================================================================
     - name: "=== PODPINANIE ISO DLA KLASTRA {{ cluster_name }} ==="
       ansible.builtin.debug:
         msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}"
 
-    - name: Sprawdź czy ISO istnieje
-      ansible.builtin.stat:
-        path: "{{ iso_file }}"
-      register: iso_stat
-      delegate_to: localhost
+    - name: Znajdz wygenerowane ISO w katalogu instalacyjnym
+      ansible.builtin.find:
+        paths: "{{ install_dir }}"
+        patterns: "agent*.iso"
+        file_type: file
+      register: iso_search
 
-    - name: Błąd — brak ISO
+    - name: Blad — brak ISO
       ansible.builtin.fail:
         msg: |
-          Nie znaleziono ISO: {{ iso_file }}
+          Nie znaleziono pliku agent*.iso w {{ install_dir }}
           Najpierw uruchom: ansible-playbook generate-ocp-agent-iso.yml -e @clusters/{{ cluster_name }}.yml
-      when: not iso_stat.stat.exists
+      when: iso_search.matched == 0
+
+    - name: Ustal sciezke do znalezionego ISO
+      ansible.builtin.set_fact:
+        iso_file: "{{ iso_search.files[0].path }}"
+
+    - name: Pokaz znalezione ISO
+      ansible.builtin.debug:
+        msg: "Bede uzywal: {{ iso_file }}"
 
     # =========================================================================
     # Krok 2: Sprawdź/utwórz DataVolume dla ISO

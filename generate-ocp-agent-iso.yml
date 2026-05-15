@@ -158,17 +158,24 @@
       register: create_image_result
       changed_when: true
 
-    - name: Sprawdź czy ISO zostało utworzone
-      ansible.builtin.stat:
-        path: "{{ install_dir }}/agent.x86_64.iso"
-      register: iso_file
+    - name: Znajdz wygenerowane ISO (dowolna nazwa agent*.iso)
+      ansible.builtin.find:
+        paths: "{{ install_dir }}"
+        patterns: "agent*.iso"
+        file_type: file
+      register: iso_search
 
-    - name: Błąd — ISO nie zostało utworzone
+    - name: Blad — ISO nie zostalo utworzone
       ansible.builtin.fail:
         msg: |
-          Nie udało się utworzyć ISO.
+          Nie udalo sie utworzyc ISO (brak agent*.iso w {{ install_dir }}).
           Output: {{ create_image_result.stderr | default('brak') }}
-      when: not iso_file.stat.exists
+      when: iso_search.matched == 0
+
+    - name: Ustal sciezke i rozmiar znalezionego ISO
+      ansible.builtin.set_fact:
+        iso_file_path: "{{ iso_search.files[0].path }}"
+        iso_file_size_mb: "{{ (iso_search.files[0].size / 1024 / 1024) | round(1) }}"
 
     # =========================================================================
     # Krok 6: Podsumowanie
@@ -178,8 +185,8 @@
         msg: |
           ISO utworzone pomyślnie!
 
-          Plik: {{ install_dir }}/agent.x86_64.iso
-          Rozmiar: {{ (iso_file.stat.size / 1024 / 1024) | round(1) }} MB
+          Plik: {{ iso_file_path }}
+          Rozmiar: {{ iso_file_size_mb }} MB
 
           Następne kroki:
           1. Upload ISO do PVC w OpenShift Virtualization
@@ -191,7 +198,7 @@
     - name: Zapisz ścieżkę do ISO
       ansible.builtin.copy:
         content: |
-          ISO_PATH={{ install_dir }}/agent.x86_64.iso
+          ISO_PATH={{ iso_file_path }}
           CLUSTER_NAME={{ cluster_name }}
           INSTALL_DIR={{ install_dir }}
         dest: "{{ install_dir }}/install-info.env"
