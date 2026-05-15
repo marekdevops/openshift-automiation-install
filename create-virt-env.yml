@@ -1,15 +1,18 @@
 ---
 # =============================================================================
-# Playbook: Tworzenie maszyn wirtualnych dla środowiska
+# Playbook: Tworzenie maszyn wirtualnych dla srodowiska
 # =============================================================================
-# Użycie:
+# Uzycie:
 #   ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml
 #
 # Logika:
-#   - Istniejące VM NIE są modyfikowane (nawet jeśli parametry się różnią)
-#   - Tylko NOWE VM są tworzone z szablonu
-#   - Po utworzeniu MAC adresy są zapisywane do pliku konfiguracyjnego
-#   - Na końcu wyświetlane są informacje o VM i MAC adresach
+#   - MAC jest PRE-GENEROWANY deterministycznie z sha256(cluster_name+node.name)
+#     i wstrzykiwany do spec.template.spec.domain.devices.interfaces[0].macAddress
+#     przy tworzeniu VM. Stabilny od narodzin VMI przez wszystkie restarty.
+#   - Jezeli node ma juz `mac` w pliku konfiguracyjnym — uzywamy go (idempotencja).
+#   - Po stworzeniu VM weryfikujemy ze VMI rozglosil oczekiwany MAC (sanity check).
+#   - Plik konfiguracyjny jest aktualizowany chirurgicznie (replace tylko linii
+#     `mac: "..."`) — komentarze i custom pola sa zachowane.
 # =============================================================================
 
 - name: Tworzenie maszyn wirtualnych
@@ -18,7 +21,6 @@
   gather_facts: false
 
   vars:
-    # Ścieżka do pliku konfiguracyjnego (przekazana przez -e @clusters/xxx.yml)
     cluster_config_file: "{{ lookup('env', 'PWD') }}/clusters/{{ cluster_name }}.yml"
 
   tasks:
@@ -30,47 +32,126 @@
         msg: "Namespace: {{ namespace }}, Nodes: {{ nodes | length }}"
 
     # =========================================================================
-    # Krok 2: Pobierz listę istniejących VM w namespace
+    # Krok 2: Decyzja o MAC per node — uzyj istniejacego z pliku lub
+    #         wygeneruj deterministycznie z sha256(cluster_name + node.name).
+    #         02:xx:xx:xx:xx:xx = locally administered MAC, nie kolidu je
+    #         z zadnym vendor OUI.
     # =========================================================================
-    - name: Pobierz listę istniejących VM
+    - name: Inicjalizuj vm_mac_map
+      ansible.builtin.set_fact:
+        vm_mac_map: {}
+
+    - name: Zdecyduj MAC dla kazdego node (existing-or-generated)
+      ansible.builtin.set_fact:
+        vm_mac_map: "{{ vm_mac_map | combine({item.name: chosen_mac}) }}"
+      vars:
+        existing_mac: "{{ item.mac | default('') }}"
+        mac_hash: "{{ (cluster_name ~ ':' ~ item.name) | hash('sha256') }}"
+        generated_mac: "02:{{ mac_hash[0:2] }}:{{ mac_hash[2:4] }}:{{ mac_hash[4:6] }}:{{ mac_hash[6:8] }}:{{ mac_hash[8:10] }}"
+        chosen_mac: "{{ existing_mac if (existing_mac | length > 0) else generated_mac }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ chosen_mac }}"
+
+    - name: Pokaz zaplanowane MAC adresy
+      ansible.builtin.debug:
+        msg: "{{ item.name }}: {{ vm_mac_map[item.name] }} ({{ 'z pliku' if (item.mac | default('') | length > 0) else 'wygenerowany' }})"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # =========================================================================
+    # Krok 3: Zaktualizuj plik konfiguracyjny MAC-ami PRZED stworzeniem VM.
+    #         (surgical replace — komentarze i custom pola zachowane)
+    # =========================================================================
+    - name: Zaktualizuj MAC w pliku konfiguracyjnym (surgical)
+      ansible.builtin.replace:
+        path: "{{ cluster_config_file }}"
+        regexp: '(^[ \t]*-\s+name:\s+{{ item.name | regex_escape }}\b[\s\S]*?^[ \t]*mac:\s*")[^"]*'
+        replace: '\g<1>{{ vm_mac_map[item.name] }}'
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
+
+    # =========================================================================
+    # Krok 4: Lista istniejacych VM w namespace + filtrowanie nowych do create
+    # =========================================================================
+    - name: Pobierz liste istniejacych VM
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachine
         namespace: "{{ namespace }}"
       register: existing_vms
 
-    - name: Zbuduj listę nazw istniejących VM
+    - name: Zbuduj liste nazw istniejacych VM
       ansible.builtin.set_fact:
         existing_vm_names: "{{ existing_vms.resources | map(attribute='metadata.name') | list }}"
 
-    - name: Pokaż istniejące VM
+    - name: Pokaz istniejace VM
       ansible.builtin.debug:
-        msg: "Istniejące VM w namespace {{ namespace }}: {{ existing_vm_names }}"
+        msg: "Istniejace VM w namespace {{ namespace }}: {{ existing_vm_names }}"
 
-    # =========================================================================
-    # Krok 3: Filtruj tylko nowe VM (których jeszcze nie ma)
-    # =========================================================================
-    - name: Określ które VM trzeba utworzyć
+    - name: Okresl ktore VM trzeba utworzyc
       ansible.builtin.set_fact:
         vms_to_create: "{{ nodes | rejectattr('name', 'in', existing_vm_names) | list }}"
 
-    - name: Pokaż VM do utworzenia
+    - name: Pokaz VM do utworzenia
       ansible.builtin.debug:
         msg: "VM do utworzenia: {{ vms_to_create | map(attribute='name') | list }}"
 
-    - name: Pokaż VM pominięte (już istnieją)
+    - name: Pokaz VM pominiete (juz istnieja)
       ansible.builtin.debug:
-        msg: "VM pominięte (już istnieją): {{ nodes | selectattr('name', 'in', existing_vm_names) | map(attribute='name') | list }}"
+        msg: "VM pominiete (juz istnieja): {{ nodes | selectattr('name', 'in', existing_vm_names) | map(attribute='name') | list }}"
 
     # =========================================================================
-    # Krok 4: Utwórz nowe VM z szablonu
+    # Krok 5: Walidacja MAC dla istniejacych VM — jezeli VM juz jest, jego
+    #         spec.macAddress musi sie zgadzac z naszym vm_mac_map. Inaczej
+    #         VM zostal stworzony bez pinowanego MAC i nalezy go usunac
+    #         (delete-virt-env.yml) i odpalic ten playbook ponownie.
     # =========================================================================
-    - name: Utwórz nowe maszyny wirtualne
+    - name: Sprawdz macAddress w spec istniejacych VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: existing_vm_spec
+      loop: "{{ nodes | selectattr('name', 'in', existing_vm_names) | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Walidacja — istniejace VM maja oczekiwany macAddress
+      ansible.builtin.assert:
+        that:
+          - actual_mac | length > 0
+          - actual_mac | lower == vm_mac_map[item.item.name] | lower
+        fail_msg: |
+          VM {{ item.item.name }} istnieje, ale jego spec.macAddress nie zgadza sie z oczekiwanym:
+            spec ma:  '{{ actual_mac | default("BRAK") }}'
+            oczekuje: '{{ vm_mac_map[item.item.name] }}'
+          To znaczy ze VM byl tworzony starsza wersja playbooka bez pinowanego MAC,
+          albo zmienia sie deterministyczna formula.
+          Rozwiaz problem: usun VM i pusc ponownie:
+            ansible-playbook delete-virt-env.yml -e @clusters/{{ cluster_name }}.yml -e remove=yes
+            ansible-playbook install-cluster.yml -e @clusters/{{ cluster_name }}.yml
+      vars:
+        actual_mac: "{{ (item.resources[0].spec.template.spec.domain.devices.interfaces | selectattr('name', 'equalto', 'vlan214') | list | first).macAddress | default('') }}"
+      loop: "{{ existing_vm_spec.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }} (actual={{ actual_mac }}, expected={{ vm_mac_map[item.item.name] }})"
+      when: existing_vm_spec.results | default([]) | length > 0
+
+    # =========================================================================
+    # Krok 6: Utworz nowe VM z szablonu — macAddress jest pinowany w spec
+    #         od narodzin (przez zmienna vm_mac_address w templacie).
+    # =========================================================================
+    - name: Utworz nowe maszyny wirtualne (z pinowanym macAddress)
       kubernetes.core.k8s:
         state: present
         definition: "{{ lookup('template', 'templates/vm-worker-large.yaml.j2') }}"
       vars:
         vm_name: "{{ item.name }}"
+        vm_mac_address: "{{ vm_mac_map[item.name] }}"
         vm_cpu_sockets: "{{ item.cpu_sockets | default(vm_defaults.cpu_sockets) }}"
         vm_memory: "{{ item.memory | default(vm_defaults.memory) }}"
         vm_disk_size: "{{ item.disk_size | default(vm_defaults.disk_size) }}"
@@ -78,14 +159,13 @@
         vm_max_memory: "{{ item.max_memory | default(vm_defaults.max_memory) }}"
       loop: "{{ vms_to_create }}"
       loop_control:
-        label: "{{ item.name }}"
-      register: created_vms
+        label: "{{ item.name }} ({{ vm_mac_map[item.name] }})"
       when: vms_to_create | length > 0
 
     # =========================================================================
-    # Krok 5: Poczekaj na utworzenie DataVolumes (provisioning dysków)
+    # Krok 7: Czekaj na DataVolumes
     # =========================================================================
-    - name: Poczekaj na zakończenie provisioningu DataVolumes
+    - name: Poczekaj na zakonczenie provisioningu DataVolumes
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
         kind: DataVolume
@@ -104,7 +184,7 @@
       when: vms_to_create | length > 0
 
     # =========================================================================
-    # Krok 6: Sprawdź czy VMI (instancje) się uruchomiły
+    # Krok 8: Czekaj az VMI sa Running
     # =========================================================================
     - name: Poczekaj na uruchomienie VMI
       kubernetes.core.k8s_info:
@@ -123,132 +203,39 @@
         label: "{{ item.name }}"
       when: vms_to_create | length > 0
 
-    - name: Walidacja — pokaż status utworzonych VM
-      ansible.builtin.debug:
-        msg: "VM {{ item.name }} uruchomiona pomyślnie (status: Running)"
-      loop: "{{ vms_to_create }}"
-      loop_control:
-        label: "{{ item.name }}"
-      when: vms_to_create | length > 0
-
     # =========================================================================
-    # Krok 7: Poczekaj az kazdy VMI rozglosi MAC w status.interfaces[vlan214]
-    #         (dotyczy wszystkich nodow, nie tylko nowo utworzonych)
+    # Krok 9: Sanity check — VMI rozglosil dokladnie nasz pre-generowany MAC.
+    #         Czeka az status.interfaces[vlan214].mac jest obecne i pasuje.
     # =========================================================================
-    - name: Poczekaj az VMI rozglosi MAC w status (vlan214)
+    - name: Sanity check — VMI rozglosil oczekiwany MAC
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
         namespace: "{{ namespace }}"
         name: "{{ item.name }}"
-      register: vmi_mac_wait
+      register: vmi_mac_check
+      vars:
+        actual_mac: >-
+          {{ (vmi_mac_check.resources[0].status.interfaces | default([])
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', 'vlan214')
+              | map(attribute='mac') | list | first | default('')) }}
+        expected_mac: "{{ vm_mac_map[item.name] }}"
       until: >
-        vmi_mac_wait.resources | length > 0 and
-        (vmi_mac_wait.resources[0].status.interfaces | default([])
-          | selectattr('name', 'defined')
-          | selectattr('name', 'equalto', 'vlan214')
-          | map(attribute='mac') | list | first | default('')) | length > 0
+        vmi_mac_check.resources | length > 0 and
+        actual_mac | length > 0 and
+        actual_mac | lower == expected_mac | lower
       retries: 30
       delay: 5
       loop: "{{ nodes }}"
       loop_control:
-        label: "{{ item.name }}"
+        label: "{{ item.name }} (oczekuje {{ vm_mac_map[item.name] }})"
 
     # =========================================================================
-    # Krok 8: Zbierz MAC adresy z VMI (po Krok 7 mamy gwarancje ze sa)
-    # =========================================================================
-    - name: Pobierz wszystkie VMI (fresh)
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ namespace }}"
-      register: all_vmis
-
-    - name: Inicjalizuj mape MAC i liste nazw nodow
-      ansible.builtin.set_fact:
-        vm_mac_map: {}
-        node_names: "{{ nodes | map(attribute='name') | list }}"
-
-    - name: Zbierz MAC z kazdego VMI
-      ansible.builtin.set_fact:
-        vm_mac_map: "{{ vm_mac_map | combine({item.metadata.name: collected_mac}) }}"
-      vars:
-        collected_mac: >-
-          {{ item.status.interfaces | default([])
-             | selectattr('name', 'defined')
-             | selectattr('name', 'equalto', 'vlan214')
-             | map(attribute='mac') | list | first | default('') }}
-      loop: "{{ all_vmis.resources | default([]) }}"
-      loop_control:
-        label: "{{ item.metadata.name | default('unknown') }}"
-      when:
-        - item.metadata is defined
-        - item.metadata.name is defined
-        - item.metadata.name in node_names
-
-    # =========================================================================
-    # Krok 9: Walidacja — kazdy node MUSI miec MAC. Inaczej fail loudly.
-    # =========================================================================
-    - name: Walidacja — kazdy node ma MAC
-      ansible.builtin.assert:
-        that:
-          - vm_mac_map[item.name] is defined
-          - vm_mac_map[item.name] | length > 0
-        fail_msg: |
-          BRAK MAC dla {{ item.name }}. Mozliwe przyczyny:
-            - VMI nie wstal poprawnie (sprawdz: oc get vmi {{ item.name }} -n {{ namespace }})
-            - Interfejs vlan214 nie zostal podpiety (Multus problem)
-            - Brak NetworkAttachmentDefinition {{ multus_network }}
-          Diagnoza:
-            oc get vmi {{ item.name }} -n {{ namespace }} -o jsonpath='{.status.interfaces}'
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    # =========================================================================
-    # Krok 10a: Pinuj macAddress w VM spec — gwarancja stabilnosci MAC przez
-    #           kazdy restart VMI (attach-iso, recover, etc.).
-    #           Bez tego niektore wersje KubeVirt randomizuja MAC przy kazdym
-    #           uruchomieniu VMI z runStrategy: Halted -> Always.
-    # =========================================================================
-    - name: Pin macAddress w VM spec (json-patch, idempotent)
-      ansible.builtin.command:
-        cmd: >-
-          oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p=[{"op":"add","path":"/spec/template/spec/domain/devices/interfaces/0/macAddress","value":"{{ vm_mac_map[item.name] }}"}]
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
-      register: pin_mac_result
-      changed_when: "'patched' in pin_mac_result.stdout"
-      failed_when:
-        - pin_mac_result.rc != 0
-        - "'no change' not in (pin_mac_result.stderr | default(''))"
-
-    # =========================================================================
-    # Krok 10b: Surgical update MAC w clusters/<name>.yml
-    #          - Tylko linie 'mac: "..."' w sekcji nodes sa zmienione
-    #          - Komentarze, niestandardowe pola (pull_secret_file,
-    #            ssh_public_key_file, custom vars) — zachowane nietkniete
-    # =========================================================================
-    - name: Zaktualizuj MAC w pliku konfiguracyjnym (per node, surgical)
-      ansible.builtin.replace:
-        path: "{{ cluster_config_file }}"
-        regexp: '(^[ \t]*-\s+name:\s+{{ item.name | regex_escape }}\b[\s\S]*?^[ \t]*mac:\s*")[^"]*'
-        replace: '\g<1>{{ vm_mac_map[item.name] }}'
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
-
-    # =========================================================================
-    # Krok 11: Set host fact `nodes_with_mac` dla orkiestracji
-    #          - Potrzebne gdy install-cluster.yml chaini ten playbook z
-    #            generate-ocp-agent-iso.yml w jednym procesie. Extra vars (-e
-    #            z @clusters/ocp1.yml) sa migawka w pamieci i NIE odswiezaja
-    #            sie po Krok 10 (file update). Bez tego facta agent-config
-    #            generuje sie z pustymi MAC.
-    #          - Standalone run: nodes_with_mac nieuzywane (kolejne wywolanie
-    #            ansible-playbook laduje swiezy plik), template fallbackuje
-    #            do `nodes` ktore jest swieze z -e.
+    # Krok 10: Host fact `nodes_with_mac` dla orkiestracji w install-cluster.yml.
+    #          Bez tego facta agent-config generuje sie z pustymi MAC,
+    #          poniewaz -e snapshot w pamieci nie odswieza sie po naszym
+    #          surgical update pliku.
     # =========================================================================
     - name: Inicjalizuj nodes_with_mac
       ansible.builtin.set_fact:
@@ -262,7 +249,7 @@
         label: "{{ item.name }}"
 
     # =========================================================================
-    # Krok 12: Podsumowanie
+    # Krok 11: Podsumowanie
     # =========================================================================
     - name: "=== TABELA NODOW ==="
       ansible.builtin.debug:
@@ -274,8 +261,8 @@
     - name: "=== SUKCES ==="
       ansible.builtin.debug:
         msg: |
+          MAC adresy pinowane w spec VM (stabilne przez restarty).
           Plik konfiguracyjny zaktualizowany chirurgicznie: {{ cluster_config_file }}
-          (komentarze i niestandardowe pola — zachowane)
 
           Nastepne kroki:
           1. Sprawdz IP dla kazdego node-a w {{ cluster_config_file }}
