@@ -152,6 +152,13 @@
         remote_src: true
         mode: '0600'
 
+    - name: Zapisz kopię agent-config.yaml przed konsumpcją (do diagnostyki)
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/agent-config.yaml"
+        dest: "{{ install_dir }}/agent-config.yaml.bak"
+        remote_src: true
+        mode: '0600'
+
     - name: Uruchom openshift-install agent create image
       ansible.builtin.command:
         cmd: "{{ openshift_install_binary }} agent create image --dir={{ install_dir }}"

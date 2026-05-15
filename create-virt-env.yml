@@ -206,7 +206,26 @@
         label: "{{ item.name }}"
 
     # =========================================================================
-    # Krok 10: Surgical update MAC w clusters/<name>.yml
+    # Krok 10a: Pinuj macAddress w VM spec — gwarancja stabilnosci MAC przez
+    #           kazdy restart VMI (attach-iso, recover, etc.).
+    #           Bez tego niektore wersje KubeVirt randomizuja MAC przy kazdym
+    #           uruchomieniu VMI z runStrategy: Halted -> Always.
+    # =========================================================================
+    - name: Pin macAddress w VM spec (json-patch, idempotent)
+      ansible.builtin.command:
+        cmd: >-
+          oc patch vm {{ item.name }} -n {{ namespace }} --type=json -p=[{"op":"add","path":"/spec/template/spec/domain/devices/interfaces/0/macAddress","value":"{{ vm_mac_map[item.name] }}"}]
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
+      register: pin_mac_result
+      changed_when: "'patched' in pin_mac_result.stdout"
+      failed_when:
+        - pin_mac_result.rc != 0
+        - "'no change' not in (pin_mac_result.stderr | default(''))"
+
+    # =========================================================================
+    # Krok 10b: Surgical update MAC w clusters/<name>.yml
     #          - Tylko linie 'mac: "..."' w sekcji nodes sa zmienione
     #          - Komentarze, niestandardowe pola (pull_secret_file,
     #            ssh_public_key_file, custom vars) — zachowane nietkniete
