@@ -13,8 +13,13 @@ additionalNTPSources:
 {% endfor %}
 {% endif %}
 
+{# When install-cluster.yml orchestrates, create-virt-env.yml sets host
+   fact `nodes_with_mac` after collecting fresh MACs (because -e snapshot
+   is stale after file update). Standalone runs reload -e per playbook
+   invocation, so `nodes` is fresh — fallback to it. #}
+{% set effective_nodes = nodes_with_mac | default(nodes) %}
 hosts:
-{% for node in nodes %}
+{% for node in effective_nodes %}
   - hostname: {{ node.hostname }}
     role: {{ node.role }}
     interfaces:

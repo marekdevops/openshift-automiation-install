@@ -221,12 +221,34 @@
         label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
 
     # =========================================================================
-    # Krok 11: Podsumowanie
+    # Krok 11: Set host fact `nodes_with_mac` dla orkiestracji
+    #          - Potrzebne gdy install-cluster.yml chaini ten playbook z
+    #            generate-ocp-agent-iso.yml w jednym procesie. Extra vars (-e
+    #            z @clusters/ocp1.yml) sa migawka w pamieci i NIE odswiezaja
+    #            sie po Krok 10 (file update). Bez tego facta agent-config
+    #            generuje sie z pustymi MAC.
+    #          - Standalone run: nodes_with_mac nieuzywane (kolejne wywolanie
+    #            ansible-playbook laduje swiezy plik), template fallbackuje
+    #            do `nodes` ktore jest swieze z -e.
+    # =========================================================================
+    - name: Inicjalizuj nodes_with_mac
+      ansible.builtin.set_fact:
+        nodes_with_mac: []
+
+    - name: Buduj nodes_with_mac (host fact, persists across plays)
+      ansible.builtin.set_fact:
+        nodes_with_mac: "{{ nodes_with_mac + [item | combine({'mac': vm_mac_map[item.name]})] }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # =========================================================================
+    # Krok 12: Podsumowanie
     # =========================================================================
     - name: "=== TABELA NODOW ==="
       ansible.builtin.debug:
         msg: "{{ item.name }} | {{ item.hostname }} | {{ item.role }} | MAC: {{ vm_mac_map[item.name] }} | IP: {{ item.ip }}"
-      loop: "{{ nodes }}"
+      loop: "{{ nodes_with_mac }}"
       loop_control:
         label: "{{ item.name }}"
 
