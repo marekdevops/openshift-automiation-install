@@ -37,60 +37,50 @@ Edit `clusters/mycluster.yml`:
 - Set `external_lb: true` for external load balancer (F5/HAProxy)
 - Define nodes with hostnames, roles, and IPs
 
-### 2. Create VMs
+### 2. Run end-to-end install (recommended)
 
+```bash
+ansible-playbook install-cluster.yml -e @clusters/mycluster.yml
+```
+
+This single playbook orchestrates the full flow: preflight validation,
+VM creation, ISO generation, boot, and wait for install. It pauses once
+to confirm before any side effects. Use `-e auto_approve=true` to skip
+the confirmation.
+
+To run only validation:
+```bash
+ansible-playbook install-cluster.yml -e @clusters/mycluster.yml --tags preflight
+```
+
+### Manual step-by-step alternative
+
+The individual playbooks below are still usable for manual control
+or troubleshooting; `install-cluster.yml` just chains them together.
+
+#### a. Create VMs
 ```bash
 ansible-playbook create-virt-env.yml -e @clusters/mycluster.yml
 ```
+Creates VMs, starts them, and saves MAC addresses to the config file.
 
-This will:
-- Create VMs in OpenShift Virtualization (without CDROM)
-- Start VMs and wait for them to run
-- **Automatically save MAC addresses** to the config file
-
-### 3. Verify Configuration
-
-Check `clusters/mycluster.yml` — MAC addresses are now populated. Verify:
-- IP addresses are correct
-- Hostnames are correct
-
-### 4. Generate Agent ISO
-
+#### b. Generate Agent ISO
 ```bash
 ansible-playbook generate-ocp-agent-iso.yml -e @clusters/mycluster.yml
 ```
-
 Output: `/tmp/ocp-install/<cluster>/agent.x86_64.iso`
 
-### 5. Attach ISO and Restart VMs
-
+#### c. Attach ISO and boot
 ```bash
 ansible-playbook cdrom/attach-iso.yml -e @clusters/mycluster.yml
 ```
+Uploads ISO to a DataVolume, attaches CDROM (bootOrder rootdisk=1,
+cdrom=2 — empty disk falls back to CDROM, installer writes to disk,
+next reboot boots from disk).
 
-This will:
-- Upload ISO to DataVolume (ReadWriteMany)
-- Stop VMs
-- Attach CDROM with ISO (bootOrder: 1)
-- Start VMs
-
-### 6. Change Boot Order (during installation)
-
-```bash
-ansible-playbook cdrom/bootorder.yml -e @clusters/mycluster.yml
-```
-
-Changes boot order to rootdisk without restarting VMs. The change takes effect when nodes restart during OCP installation.
-
-### 7. Monitor Installation
-
+#### d. Monitor installation
 ```bash
 ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml
-```
-
-Or manually:
-```bash
-openshift-install agent wait-for install-complete --dir=/tmp/ocp-install/<cluster>
 ```
 
 ## Playbooks
@@ -99,6 +89,7 @@ openshift-install agent wait-for install-complete --dir=/tmp/ocp-install/<cluste
 
 | Playbook | Description |
 |----------|-------------|
+| `install-cluster.yml` | **End-to-end orchestrator**: preflight + VMs + ISO + boot + wait |
 | `create-virt-env.yml` | Creates VMs (no CDROM), starts, saves MAC addresses |
 | `delete-virt-env.yml` | Deletes VMs (dry-run by default, use `-e remove=yes`) |
 | `generate-ocp-agent-iso.yml` | Generates Agent-Based Installer ISO |

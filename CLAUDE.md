@@ -35,7 +35,17 @@ openshift-automation-install/
 All playbooks use cluster configuration from `clusters/<name>.yml`:
 
 ```bash
-# === Core Workflow ===
+# === One-shot end-to-end install ===
+# Preflight + create VMs + ISO + boot + wait, with a confirmation pause.
+ansible-playbook install-cluster.yml -e @clusters/ocp1.yml
+
+# Skip confirmation (CI/automation):
+ansible-playbook install-cluster.yml -e @clusters/ocp1.yml -e auto_approve=true
+
+# Run only preflight (validate config + tools + hosting cluster):
+ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags preflight
+
+# === Core Workflow (manual, step-by-step) ===
 
 # Create VMs (auto-saves MAC addresses to config file)
 ansible-playbook create-virt-env.yml -e @clusters/ocp1.yml

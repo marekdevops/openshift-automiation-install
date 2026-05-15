@@ -1,0 +1,305 @@
+---
+# =============================================================================
+# install-cluster.yml — end-to-end OpenShift cluster install
+# =============================================================================
+# Single entrypoint that orchestrates the full install:
+#   PHASE 1: Preflight   — validate config, tools, hosting cluster, network
+#   PHASE 2: Create VMs  — provision VMs on OpenShift Virtualization
+#   PHASE 3: Generate ISO— openshift-install agent create image
+#   PHASE 4: Attach ISO  — upload ISO to DV, attach CDROM, boot
+#   PHASE 5: Wait        — bootstrap-complete + install-complete
+#   PHASE 6: Summary     — console URL, API URL, kubeadmin password
+#
+# Usage:
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml
+#
+# Skip interactive confirmation:
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml -e auto_approve=true
+#
+# Run a single phase via tags:
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags preflight
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags vms
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags iso,boot,wait
+#
+# Prerequisites (validated by preflight):
+#   - openshift-install, oc, virtctl in PATH
+#   - oc logged in to hosting cluster (oc login)
+#   - pull-secret.json at ~/.openshift/pull-secret.json (or override)
+#   - SSH public key at ~/.ssh/id_ed25519.pub (or override)
+#   - Namespace exists in hosting cluster
+#   - NetworkAttachmentDefinition (multus_network) exists
+#   - Load balancer + DNS configured externally (api, api-int, *.apps)
+#
+# Individual playbooks remain usable for manual step-by-step runs:
+#   create-virt-env.yml, generate-ocp-agent-iso.yml,
+#   cdrom/attach-iso.yml, wait-ocp-install.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PHASE 1 — Preflight (no side effects, fail fast)
+# -----------------------------------------------------------------------------
+- name: "PHASE 1 — Preflight checks"
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [preflight, always]
+
+  vars:
+    auto_approve: false
+    openshift_install_binary: /usr/local/bin/openshift-install
+    pull_secret_file: ~/.openshift/pull-secret.json
+    ssh_public_key_file: ~/.ssh/id_ed25519.pub
+
+  tasks:
+    - name: Banner
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          OpenShift cluster install — preflight
+          Cluster:    {{ cluster_name | default('?') }}.{{ base_domain | default('?') }}
+          Namespace:  {{ namespace | default('?') }}
+          ============================================================
+
+    # ── Required cluster config ────────────────────────────────────────────
+    - name: Required cluster variables are set
+      ansible.builtin.assert:
+        that:
+          - cluster_name is defined and cluster_name | length > 0
+          - base_domain is defined and base_domain | length > 0
+          - namespace is defined and namespace | length > 0
+          - multus_network is defined and multus_network | length > 0
+          - machine_network is defined
+          - gateway is defined
+          - dns_servers is defined and dns_servers | length > 0
+          - nodes is defined and nodes is iterable
+          - external_lb is defined
+        fail_msg: |
+          Missing required variable. Check clusters/{{ cluster_name | default('<name>') }}.yml.
+
+    - name: Multus network must be in 'namespace/name' format
+      ansible.builtin.assert:
+        that:
+          - multus_network is match('^[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$')
+        fail_msg: |
+          multus_network must be 'namespace/name' (got: {{ multus_network }})
+
+    - name: At least 3 master nodes are defined
+      ansible.builtin.assert:
+        that:
+          - (nodes | selectattr('role', 'equalto', 'master') | list | length) >= 3
+        fail_msg: |
+          Need >= 3 master nodes. Found {{ nodes | selectattr('role', 'equalto', 'master') | list | length }}.
+
+    - name: Internal LB requires api_vip and ingress_vip
+      ansible.builtin.assert:
+        that:
+          - api_vip is defined
+          - ingress_vip is defined
+        fail_msg: "external_lb=false requires api_vip and ingress_vip in cluster config"
+      when: not (external_lb | bool)
+
+    - name: Every node has name, hostname, role, ip
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.hostname is defined
+          - item.role in ['master', 'worker']
+          - item.ip is defined and item.ip | length > 0
+        fail_msg: "Node entry incomplete: {{ item | default({}) }}"
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
+
+    # ── Required local tools ───────────────────────────────────────────────
+    - name: Required CLI tools are in PATH
+      ansible.builtin.command: "which {{ item }}"
+      register: tool_check
+      changed_when: false
+      failed_when: tool_check.rc != 0
+      loop:
+        - oc
+        - virtctl
+      loop_control:
+        label: "{{ item }}"
+
+    - name: openshift-install binary exists at configured path
+      ansible.builtin.stat:
+        path: "{{ openshift_install_binary }}"
+      register: oi_stat
+
+    - name: Fail if openshift-install missing
+      ansible.builtin.fail:
+        msg: |
+          openshift-install not found at {{ openshift_install_binary }}.
+          Download from: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/
+      when: not oi_stat.stat.exists
+
+    # ── Required input files ───────────────────────────────────────────────
+    - name: Pull-secret file exists
+      ansible.builtin.stat:
+        path: "{{ pull_secret_file }}"
+      register: ps_stat
+
+    - name: Fail if pull-secret missing
+      ansible.builtin.fail:
+        msg: |
+          Pull secret not found at {{ pull_secret_file }}.
+          Get one from: https://console.redhat.com/openshift/install/pull-secret
+      when: not ps_stat.stat.exists
+
+    - name: SSH public key exists
+      ansible.builtin.stat:
+        path: "{{ ssh_public_key_file }}"
+      register: ssh_stat
+
+    - name: Fail if SSH key missing
+      ansible.builtin.fail:
+        msg: "SSH public key not found at {{ ssh_public_key_file }}"
+      when: not ssh_stat.stat.exists
+
+    # ── Hosting cluster connectivity ───────────────────────────────────────
+    - name: oc is logged in to a hosting cluster
+      ansible.builtin.command: oc whoami
+      register: oc_user
+      changed_when: false
+      failed_when: oc_user.rc != 0
+
+    - name: Namespace exists in hosting cluster
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ namespace }}"
+      register: ns_info
+      failed_when: ns_info.resources | length == 0
+
+    - name: NetworkAttachmentDefinition exists
+      kubernetes.core.k8s_info:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        namespace: "{{ multus_network.split('/')[0] }}"
+        name: "{{ multus_network.split('/')[1] }}"
+      register: nad_info
+      failed_when: nad_info.resources | length == 0
+
+    # ── DNS sanity (warning only — DNS may be set up later) ────────────────
+    - name: DNS check — api.{{ cluster_name }}.{{ base_domain }}
+      ansible.builtin.command: "getent hosts api.{{ cluster_name }}.{{ base_domain }}"
+      register: dns_api
+      changed_when: false
+      failed_when: false
+
+    - name: WARN — API DNS does not resolve yet
+      ansible.builtin.debug:
+        msg: |
+          WARNING: api.{{ cluster_name }}.{{ base_domain }} does not resolve.
+          Make sure your load balancer + DNS are configured before install-complete
+          (otherwise wait-for install-complete will time out on API health).
+      when: dns_api.rc != 0
+
+    # ── Confirmation ───────────────────────────────────────────────────────
+    - name: "Ready to install — review and confirm"
+      ansible.builtin.debug:
+        msg: |
+
+          Cluster:       {{ cluster_name }}.{{ base_domain }}
+          Namespace:     {{ namespace }}
+          Multus net:    {{ multus_network }}
+          Machine net:   {{ machine_network }} (gw {{ gateway }})
+          Nodes:         {{ nodes | length }}
+                         {{ nodes | selectattr('role','equalto','master') | list | length }} master(s):
+                         {% for n in nodes | selectattr('role','equalto','master') | list %}  - {{ n.name }} ({{ n.ip }})
+                         {% endfor %}{% if nodes | selectattr('role','equalto','worker') | list | length > 0 %}
+                         {{ nodes | selectattr('role','equalto','worker') | list | length }} worker(s):
+                         {% for n in nodes | selectattr('role','equalto','worker') | list %}  - {{ n.name }} ({{ n.ip }})
+                         {% endfor %}{% endif %}
+          Load balancer: {{ 'external (DNS-only, no VIPs)' if (external_lb | bool) else 'internal (keepalived) — api_vip=' ~ api_vip ~ ', ingress_vip=' ~ ingress_vip }}
+          OC context:    {{ oc_user.stdout }}
+
+          Estimated total time: 30-60 min
+          This will: create VMs, generate ISO, boot, wait for install.
+
+    - name: Confirm before proceeding
+      ansible.builtin.pause:
+        prompt: "Press ENTER to start install, or Ctrl+C to abort"
+      when: not (auto_approve | bool)
+
+
+# -----------------------------------------------------------------------------
+# PHASE 2 — Create VMs
+# -----------------------------------------------------------------------------
+- name: "PHASE 2 — Create VMs"
+  ansible.builtin.import_playbook: create-virt-env.yml
+  tags: [vms]
+
+
+# -----------------------------------------------------------------------------
+# PHASE 3 — Generate Agent ISO
+# -----------------------------------------------------------------------------
+- name: "PHASE 3 — Generate Agent-Based Installer ISO"
+  ansible.builtin.import_playbook: generate-ocp-agent-iso.yml
+  tags: [iso]
+
+
+# -----------------------------------------------------------------------------
+# PHASE 4 — Attach ISO and boot
+# -----------------------------------------------------------------------------
+- name: "PHASE 4 — Attach ISO and boot VMs"
+  ansible.builtin.import_playbook: cdrom/attach-iso.yml
+  tags: [boot]
+
+
+# -----------------------------------------------------------------------------
+# PHASE 5 — Wait for cluster install to finish
+# -----------------------------------------------------------------------------
+- name: "PHASE 5 — Wait for cluster install"
+  ansible.builtin.import_playbook: wait-ocp-install.yml
+  tags: [wait]
+
+
+# -----------------------------------------------------------------------------
+# PHASE 6 — Final summary
+# -----------------------------------------------------------------------------
+- name: "PHASE 6 — Cluster ready"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [summary, always]
+
+  vars:
+    install_dir: "/tmp/ocp-install/{{ cluster_name }}"
+
+  tasks:
+    - name: Check kubeconfig
+      ansible.builtin.stat:
+        path: "{{ install_dir }}/auth/kubeconfig"
+      register: kc_stat
+
+    - name: Read kubeadmin password
+      ansible.builtin.slurp:
+        src: "{{ install_dir }}/auth/kubeadmin-password"
+      register: kap_b64
+      when: kc_stat.stat.exists
+
+    - name: "===== CLUSTER READY ====="
+      ansible.builtin.debug:
+        msg: |
+
+          ============================================================
+          OpenShift cluster {{ cluster_name }}.{{ base_domain }} is ready.
+          ============================================================
+
+          Console:    https://console-openshift-console.apps.{{ cluster_name }}.{{ base_domain }}
+          API:        https://api.{{ cluster_name }}.{{ base_domain }}:6443
+
+          Login as kubeadmin:
+            oc login -u kubeadmin -p '{{ kap_b64.content | b64decode | trim if kc_stat.stat.exists else "<password file missing>" }}' \
+              https://api.{{ cluster_name }}.{{ base_domain }}:6443
+
+          Or use kubeconfig directly:
+            export KUBECONFIG={{ install_dir }}/auth/kubeconfig
+            oc whoami
+
+          Next steps (recommended):
+            - Configure an identity provider (htpasswd / OIDC / LDAP)
+            - Rotate or disable the kubeadmin account once IDP is working
+            - Replace self-signed ingress certificates
