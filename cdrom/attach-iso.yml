@@ -56,65 +56,11 @@
         msg: "Bede uzywal: {{ iso_file }}"
 
     # =========================================================================
-    # Krok 2: Sprawdź/utwórz DataVolume dla ISO
+    # Krok 2: Zatrzymaj VM (jezeli sa Running) zanim ruszymy DV.
+    #         Bez tego delete starego DV moze sie zablokowac, gdy istniejacy
+    #         VMI ma juz to ISO jako CDROM z poprzedniego runu.
     # =========================================================================
-    - name: Sprawdź czy DataVolume dla ISO istnieje
-      kubernetes.core.k8s_info:
-        api_version: cdi.kubevirt.io/v1beta1
-        kind: DataVolume
-        namespace: "{{ namespace }}"
-        name: "{{ iso_pvc_name }}"
-      register: iso_dv_info
-
-    - name: "=== UPLOAD ISO DO DATAVOLUME ==="
-      ansible.builtin.debug:
-        msg: "Uploaduję {{ iso_file }} do DataVolume {{ iso_pvc_name }}..."
-      when: iso_dv_info.resources | length == 0
-
-    - name: Upload ISO do DataVolume przez virtctl
-      ansible.builtin.command:
-        cmd: >
-          virtctl image-upload dv {{ iso_pvc_name }}
-          --size=2Gi
-          --image-path={{ iso_file }}
-          -n {{ namespace }}
-          --access-mode=ReadWriteMany
-          --insecure
-      when: iso_dv_info.resources | length == 0
-      register: upload_result
-
-    - name: Poczekaj na zakończenie importu DataVolume
-      kubernetes.core.k8s_info:
-        api_version: cdi.kubevirt.io/v1beta1
-        kind: DataVolume
-        namespace: "{{ namespace }}"
-        name: "{{ iso_pvc_name }}"
-      register: dv_status
-      until: >
-        dv_status.resources | length > 0 and
-        dv_status.resources[0].status.phase | default('') == 'Succeeded'
-      retries: 30
-      delay: 10
-      when: iso_dv_info.resources | length == 0
-
-    - name: Upload zakończony
-      ansible.builtin.debug:
-        msg: "ISO uploadowane do DataVolume {{ iso_pvc_name }}"
-      when: iso_dv_info.resources | length == 0
-
-    - name: DataVolume już istnieje
-      ansible.builtin.debug:
-        msg: "DataVolume {{ iso_pvc_name }} już istnieje — pomijam upload"
-      when: iso_dv_info.resources | length > 0
-
-    # =========================================================================
-    # Krok 3: Zatrzymaj VM przed modyfikacją
-    # =========================================================================
-    - name: "=== ZATRZYMYWANIE VM ==="
-      ansible.builtin.debug:
-        msg: "Zatrzymuję VM przed dodaniem CDROM..."
-
-    - name: Zatrzymaj VM
+    - name: Zatrzymaj VM (przed manipulacja DV)
       kubernetes.core.k8s:
         api_version: kubevirt.io/v1
         kind: VirtualMachine
@@ -129,19 +75,130 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Poczekaj na zatrzymanie VMI
+    - name: Poczekaj az kazdy VMI zniknie (przed DV ops)
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
         namespace: "{{ namespace }}"
         name: "{{ item.name }}"
-      register: vmi_check
-      until: vmi_check.resources | length == 0
+      register: vmi_pre_dv_check
+      until: vmi_pre_dv_check.resources | length == 0
       retries: 30
       delay: 5
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }}"
+
+    # =========================================================================
+    # Krok 3: Synchronizuj DataVolume z aktualnym ISO (checksum-based).
+    #
+    # Stara logika "skip jezeli DV istnieje" powodowala ze przy ponownej
+    # instalacji (nowe VMs, nowy ISO) podpinalismy STARE ISO z poprzedniego
+    # runu. Teraz porownujemy SHA256 lokalnego ISO z adnotacja na DV i:
+    #   - DV nie istnieje                      -> upload + annotate
+    #   - DV istnieje, SHA pasuje              -> skip (idempotent)
+    #   - DV istnieje, SHA rozni sie / brak    -> delete + upload + annotate
+    # =========================================================================
+    - name: Policz SHA256 lokalnego ISO
+      ansible.builtin.command:
+        cmd: "sha256sum {{ iso_file }}"
+      register: iso_sha_result
+      changed_when: false
+
+    - name: Ustal SHA256 ISO
+      ansible.builtin.set_fact:
+        iso_sha256: "{{ iso_sha_result.stdout.split()[0] }}"
+
+    - name: Pobierz info o DV (jezeli istnieje)
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+      register: iso_dv_info
+
+    - name: Wyznacz decyzje (upload / skip / replace)
+      ansible.builtin.set_fact:
+        dv_exists: "{{ iso_dv_info.resources | length > 0 }}"
+        dv_sha: >-
+          {{ (iso_dv_info.resources[0].metadata.annotations | default({}))['iso-sha256']
+             | default('') if (iso_dv_info.resources | length > 0) else '' }}
+
+    - name: Wyznacz dv_needs_upload
+      ansible.builtin.set_fact:
+        dv_needs_upload: "{{ (not dv_exists) or (dv_sha != iso_sha256) }}"
+
+    - name: "=== STATUS DATAVOLUME ==="
+      ansible.builtin.debug:
+        msg: |
+          Lokalny ISO SHA: {{ iso_sha256 }}
+          DV ISO SHA:      {{ dv_sha if dv_exists else 'DV NIE ISTNIEJE' }}
+          Akcja:           {{ 'DELETE+UPLOAD (DV jest stale)' if (dv_exists and dv_needs_upload)
+                              else 'UPLOAD (DV nie istnieje)' if dv_needs_upload
+                              else 'SKIP (DV juz ma to ISO)' }}
+
+    - name: Usun przestarzala DataVolume
+      kubernetes.core.k8s:
+        state: absent
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+        wait: true
+        wait_timeout: 300
+      when:
+        - dv_exists
+        - dv_needs_upload
+
+    - name: Upload ISO do DataVolume przez virtctl
+      ansible.builtin.command:
+        cmd: >
+          virtctl image-upload dv {{ iso_pvc_name }}
+          --size=2Gi
+          --image-path={{ iso_file }}
+          -n {{ namespace }}
+          --access-mode=ReadWriteMany
+          --insecure
+      when: dv_needs_upload
+      register: upload_result
+
+    - name: Poczekaj na zakonczenie importu DataVolume
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+      register: dv_status
+      until: >
+        dv_status.resources | length > 0 and
+        dv_status.resources[0].status.phase | default('') == 'Succeeded'
+      retries: 30
+      delay: 10
+      when: dv_needs_upload
+
+    - name: Annotuj DV checksumem ISO (znacznik co jest w srodku)
+      kubernetes.core.k8s:
+        state: present
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ iso_pvc_name }}"
+        merge_type: merge
+        definition:
+          metadata:
+            annotations:
+              iso-sha256: "{{ iso_sha256 }}"
+      when: dv_needs_upload
+
+    - name: Upload zakonczony
+      ansible.builtin.debug:
+        msg: "ISO uploadowane do DataVolume {{ iso_pvc_name }} (SHA: {{ iso_sha256 }})"
+      when: dv_needs_upload
+
+    - name: DataVolume aktualne — pomijam upload
+      ansible.builtin.debug:
+        msg: "DV {{ iso_pvc_name }} juz ma to ISO (SHA: {{ iso_sha256 }}) — pomijam upload"
+      when: not dv_needs_upload
 
     # =========================================================================
     # Krok 4: Dodaj CDROM do VM
