@@ -111,6 +111,29 @@ nodes:
   #   ip: 192.168.214.21
 
 # -----------------------------------------------------------------------------
+# Day-2 — dodawanie workerow do JUZ DZIALAJACEGO klastra
+# -----------------------------------------------------------------------------
+# UWAGA: ta lista jest IGNOROWANA przez day-1 (create-virt-env, generate-iso,
+# install-cluster). Czytaja ja tylko `add-nodes.yml` + `templates/nodes-config.yaml.j2`.
+# Format wpisu identyczny jak w `nodes:` — MAC uzupelni sie automatycznie.
+#
+# Uzycie:
+#   ansible-playbook add-nodes.yml -e @clusters/ocp1.yml
+#
+# additional_nodes:
+#   - name: ocp1-worker-1
+#     hostname: worker-1
+#     role: worker
+#     mac: ""
+#     ip: 192.168.214.21
+#
+#   - name: ocp1-worker-2
+#     hostname: worker-2
+#     role: worker
+#     mac: ""
+#     ip: 192.168.214.22
+
+# -----------------------------------------------------------------------------
 # HAProxy — zewnetrzny load balancer
 # -----------------------------------------------------------------------------
 # Uzywane przez: ansible-playbook haproxy/deploy-haproxy.yml -e @clusters/ocp1.yml -e @vars/infra.yml

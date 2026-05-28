@@ -1,0 +1,677 @@
+---
+# =============================================================================
+# Playbook: Dodawanie wezlow (day-2) do dzialajacego klastra OCP
+# =============================================================================
+# Uzycie:
+#   ansible-playbook add-nodes.yml -e @clusters/ocp1.yml
+#
+# Tryby etapowe (tagi sa kumulatywne — dodajesz kolejny, zeby pojsc dalej):
+#   --tags preflight                          # tylko walidacja
+#   --tags preflight,mac                      # + wypelnienie MAC w pliku klastra
+#   --tags preflight,mac,vm                   # + stworzenie VM
+#   --tags preflight,mac,vm,render            # + render nodes-config.yaml (do przejrzenia)
+#   --tags preflight,mac,vm,render,iso        # + generowanie node.iso (bez bootu)
+#   (pelny przebieg bez tagow)                # cala droga az nowe nody beda Ready
+#
+# Wymagania:
+#   - Klaster juz zainstalowany (oc whoami zwraca aktualnego usera)
+#   - additional_nodes: zdefiniowane w clusters/<n>.yml (tylko role: worker)
+#   - pull-secret w ~/.openshift/pull-secret.json (dla --registry-config)
+#   - virtctl (upload node.iso do DataVolume)
+#   - oc (OCP >= 4.17 — wspiera `oc adm node-image`)
+#
+# Izolacja od day-1 (NIC NIE PSUJE DOTYCHCZASOWEGO FLOW):
+#   - Czyta `additional_nodes:` (NIE `nodes:`)
+#   - Asset dir: /tmp/ocp-node-add/<cluster>  (NIE /tmp/ocp-install/<cluster>)
+#   - ISO: node.iso (NIE agent.x86_64.iso)
+#   - DataVolume: node-image-iso  (NIE iso_pvc_name = agent-iso-pvc)
+#   - Host fact MAC-ow: additional_nodes_with_mac (NIE nodes_with_mac)
+#   - Komenda: oc adm node-image create  (NIE openshift-install agent create image)
+# =============================================================================
+
+- name: Day-2 — dodanie nowych wezlow do klastra
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    cluster_config_file: "{{ lookup('env', 'PWD') }}/clusters/{{ cluster_name }}.yml"
+    node_install_dir: "/tmp/ocp-node-add/{{ cluster_name }}"
+    node_iso_output: node.iso
+    node_iso_pvc_name: node-image-iso
+    pull_secret_file: ~/.openshift/pull-secret.json
+    openshift_oc_binary: oc
+    csr_approve_retries: 80    # 80 * 15s = 20 min
+    csr_approve_delay: 15
+
+  tasks:
+    # =========================================================================
+    # Krok 1: Walidacja
+    # =========================================================================
+    - name: "=== DODAWANIE WEZLOW DO KLASTRA {{ cluster_name }} ==="
+      ansible.builtin.debug:
+        msg: "Namespace: {{ namespace }} | additional_nodes: {{ (additional_nodes | default([])) | length }}"
+      tags: [preflight]
+
+    - name: Walidacja — additional_nodes zdefiniowane i niepuste
+      ansible.builtin.assert:
+        that:
+          - additional_nodes is defined
+          - additional_nodes | length > 0
+        fail_msg: |
+          Brak `additional_nodes:` w {{ cluster_config_file }} (albo pusta lista).
+          Dodaj sekcje analogiczna do `nodes:` ze wpisami workerow do dolaczenia.
+      tags: [preflight]
+
+    - name: Walidacja — wpisy poprawne (name/hostname/ip + role=worker)
+      ansible.builtin.assert:
+        that:
+          - item.name is defined and item.name | length > 0
+          - item.hostname is defined and item.hostname | length > 0
+          - item.ip is defined and item.ip | length > 0
+          - (item.role | default('worker')) == 'worker'
+        fail_msg: |
+          Wpis additional_nodes ma problem:
+            name:     '{{ item.name | default("UNSET") }}'
+            hostname: '{{ item.hostname | default("UNSET") }}'
+            ip:       '{{ item.ip | default("UNSET") }}'
+            role:     '{{ item.role | default("worker") }}'
+          Day-2 obsluguje wylacznie role=worker.
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
+      tags: [preflight]
+
+    - name: Walidacja — nazwy nie koliduja z `nodes:`
+      ansible.builtin.assert:
+        that:
+          - item.name not in (nodes | map(attribute='name') | list)
+          - item.hostname not in (nodes | map(attribute='hostname') | list)
+        fail_msg: |
+          Kolizja: '{{ item.name }}'/'{{ item.hostname }}' wystepuje juz w `nodes:`.
+          additional_nodes musi miec unikalne nazwy/hostname-y wzgledem listy day-1.
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [preflight]
+
+    - name: Walidacja — pull-secret istnieje
+      ansible.builtin.stat:
+        path: "{{ pull_secret_file | replace('~', lookup('env', 'HOME')) }}"
+      register: ps_check
+      tags: [preflight]
+
+    - name: Blad — brak pull-secret
+      ansible.builtin.fail:
+        msg: |
+          Nie znaleziono pull-secret w {{ pull_secret_file }}.
+          Potrzebny dla `oc adm node-image create --registry-config`.
+      when: not ps_check.stat.exists
+      tags: [preflight]
+
+    - name: Walidacja — oc zalogowany do klastra
+      ansible.builtin.command:
+        cmd: "{{ openshift_oc_binary }} whoami"
+      register: oc_whoami
+      changed_when: false
+      tags: [preflight]
+
+    - name: "=== KONTEKST OC ==="
+      ansible.builtin.debug:
+        msg: "oc user: {{ oc_whoami.stdout }}"
+      tags: [preflight]
+
+    # =========================================================================
+    # Krok 2: Decyzja MAC dla additional_nodes (formula identyczna jak create-virt-env)
+    #         02:xx:xx:xx:xx:xx = locally administered. Deterministyczne z
+    #         sha256(cluster_name + node.name), stabilne miedzy uruchomieniami.
+    # =========================================================================
+    - name: Inicjalizuj vm_mac_map
+      ansible.builtin.set_fact:
+        vm_mac_map: {}
+      tags: [mac]
+
+    - name: Zdecyduj MAC per additional_node (existing-or-generated)
+      ansible.builtin.set_fact:
+        vm_mac_map: "{{ vm_mac_map | combine({item.name: chosen_mac}) }}"
+      vars:
+        existing_mac: "{{ item.mac | default('') }}"
+        mac_hash: "{{ (cluster_name ~ ':' ~ item.name) | hash('sha256') }}"
+        generated_mac: "02:{{ mac_hash[0:2] }}:{{ mac_hash[2:4] }}:{{ mac_hash[4:6] }}:{{ mac_hash[6:8] }}:{{ mac_hash[8:10] }}"
+        chosen_mac: "{{ existing_mac if (existing_mac | length > 0) else generated_mac }}"
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ chosen_mac }}"
+      tags: [mac]
+
+    - name: Pokaz zaplanowane MAC
+      ansible.builtin.debug:
+        msg: "{{ item.name }}: {{ vm_mac_map[item.name] }} ({{ 'z pliku' if (item.mac | default('') | length > 0) else 'wygenerowany' }})"
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [mac]
+
+    # =========================================================================
+    # Krok 3: Surgical update pliku konfiguracyjnego (regex z create-virt-env)
+    #         Matchuje `- name: <name> ... mac: "..."` w dowolnej liscie YAML
+    #         (nodes: lub additional_nodes:) — bo zaleznosc jest strukturalna,
+    #         nie nazwy listy. Asercja w kroku 1 gwarantuje brak kolizji nazw.
+    # =========================================================================
+    - name: Zaktualizuj MAC w pliku konfiguracyjnym (additional_nodes)
+      ansible.builtin.replace:
+        path: "{{ cluster_config_file }}"
+        regexp: '(^[ \t]*-\s+name:\s+{{ item.name | regex_escape }}\b[\s\S]*?^[ \t]*mac:\s*")[^"]*'
+        replace: '\g<1>{{ vm_mac_map[item.name] }}'
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ vm_mac_map[item.name] }}"
+      tags: [mac]
+
+    # =========================================================================
+    # Krok 4: Lista istniejacych VM + filtrowanie nowych
+    # =========================================================================
+    - name: Pobierz liste istniejacych VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+      register: existing_vms
+      tags: [vm]
+
+    - name: Zbuduj liste nazw istniejacych VM
+      ansible.builtin.set_fact:
+        existing_vm_names: "{{ existing_vms.resources | map(attribute='metadata.name') | list }}"
+      tags: [vm]
+
+    - name: Okresl ktore VM trzeba utworzyc
+      ansible.builtin.set_fact:
+        vms_to_create: "{{ additional_nodes | rejectattr('name', 'in', existing_vm_names) | list }}"
+      tags: [vm]
+
+    - name: Pokaz VM do utworzenia / pominiete
+      ansible.builtin.debug:
+        msg: |
+          Do utworzenia:    {{ vms_to_create | map(attribute='name') | list }}
+          Juz istnieje:     {{ additional_nodes | selectattr('name', 'in', existing_vm_names) | map(attribute='name') | list }}
+      tags: [vm]
+
+    # =========================================================================
+    # Krok 5: Walidacja MAC dla juz istniejacych VM (idempotencja)
+    # =========================================================================
+    - name: Sprawdz macAddress w spec istniejacych VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: existing_vm_spec
+      loop: "{{ additional_nodes | selectattr('name', 'in', existing_vm_names) | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [vm]
+
+    - name: Walidacja — istniejace VM maja oczekiwany macAddress
+      ansible.builtin.assert:
+        that:
+          - actual_mac | length > 0
+          - actual_mac | lower == vm_mac_map[item.item.name] | lower
+        fail_msg: |
+          VM {{ item.item.name }} istnieje, ale spec.macAddress sie nie zgadza:
+            spec ma:  '{{ actual_mac | default("BRAK") }}'
+            oczekuje: '{{ vm_mac_map[item.item.name] }}'
+          Usun VM (kubevirt) i odpal ponownie ten playbook.
+      vars:
+        actual_mac: "{{ (item.resources[0].spec.template.spec.domain.devices.interfaces | selectattr('name', 'equalto', 'vlan214') | list | first).macAddress | default('') }}"
+      loop: "{{ existing_vm_spec.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: existing_vm_spec.results | default([]) | length > 0
+      tags: [vm]
+
+    # =========================================================================
+    # Krok 6: Utworz nowe VM z templatu (pinowany MAC od narodzin)
+    # =========================================================================
+    - name: Utworz nowe VM
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'templates/vm-worker-large.yaml.j2') }}"
+      vars:
+        vm_name: "{{ item.name }}"
+        vm_mac_address: "{{ vm_mac_map[item.name] }}"
+        vm_cpu_sockets: "{{ item.cpu_sockets | default(vm_defaults.cpu_sockets) }}"
+        vm_memory: "{{ item.memory | default(vm_defaults.memory) }}"
+        vm_disk_size: "{{ item.disk_size | default(vm_defaults.disk_size) }}"
+        vm_max_cpu_sockets: "{{ item.max_cpu_sockets | default(vm_defaults.max_cpu_sockets) }}"
+        vm_max_memory: "{{ item.max_memory | default(vm_defaults.max_memory) }}"
+      loop: "{{ vms_to_create }}"
+      loop_control:
+        label: "{{ item.name }} ({{ vm_mac_map[item.name] }})"
+      when: vms_to_create | length > 0
+      tags: [vm]
+
+    - name: Poczekaj na DataVolumes rootdisk
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}-rootdisk"
+      register: dv_status
+      until: >
+        dv_status.resources | length > 0 and
+        (dv_status.resources[0].status.phase | default('') == 'Succeeded' or
+         dv_status.resources[0].status.phase | default('') == 'WaitForFirstConsumer')
+      retries: 30
+      delay: 10
+      loop: "{{ vms_to_create }}"
+      loop_control:
+        label: "{{ item.name }}-rootdisk"
+      when: vms_to_create | length > 0
+      tags: [vm]
+
+    - name: Poczekaj na VMI Running (do sanity MAC)
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_status
+      until: >
+        vmi_status.resources | length > 0 and
+        vmi_status.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ vms_to_create }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: vms_to_create | length > 0
+      tags: [vm]
+
+    - name: Sanity check — VMI rozglosil oczekiwany MAC
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_mac_check
+      vars:
+        actual_mac: >-
+          {{ (vmi_mac_check.resources[0].status.interfaces | default([])
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', 'vlan214')
+              | map(attribute='mac') | list | first | default('')) }}
+        expected_mac: "{{ vm_mac_map[item.name] }}"
+      until: >
+        vmi_mac_check.resources | length > 0 and
+        actual_mac | length > 0 and
+        actual_mac | lower == expected_mac | lower
+      retries: 30
+      delay: 5
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }} (oczekuje {{ vm_mac_map[item.name] }})"
+      tags: [vm]
+
+    # =========================================================================
+    # Krok 7: Host fact additional_nodes_with_mac (dla templatu nodes-config)
+    # =========================================================================
+    - name: Inicjalizuj additional_nodes_with_mac
+      ansible.builtin.set_fact:
+        additional_nodes_with_mac: []
+      tags: [render]
+
+    - name: Buduj additional_nodes_with_mac
+      ansible.builtin.set_fact:
+        additional_nodes_with_mac: "{{ additional_nodes_with_mac + [item | combine({'mac': vm_mac_map[item.name]})] }}"
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [render]
+
+    # =========================================================================
+    # Krok 8: Render nodes-config.yaml
+    # =========================================================================
+    - name: Usun stary node_install_dir
+      ansible.builtin.file:
+        path: "{{ node_install_dir }}"
+        state: absent
+      tags: [render]
+
+    - name: Utworz node_install_dir
+      ansible.builtin.file:
+        path: "{{ node_install_dir }}"
+        state: directory
+        mode: '0755'
+      tags: [render]
+
+    - name: Wyrenderuj nodes-config.yaml
+      ansible.builtin.template:
+        src: templates/nodes-config.yaml.j2
+        dest: "{{ node_install_dir }}/nodes-config.yaml"
+        mode: '0600'
+      tags: [render]
+
+    - name: Pokaz wyrenderowany nodes-config.yaml
+      ansible.builtin.command:
+        cmd: "cat {{ node_install_dir }}/nodes-config.yaml"
+      register: nodes_config_preview
+      changed_when: false
+      tags: [render]
+
+    - name: Preview nodes-config.yaml
+      ansible.builtin.debug:
+        msg: "{{ nodes_config_preview.stdout_lines }}"
+      tags: [render]
+
+    # =========================================================================
+    # Krok 9: oc adm node-image create -> node.iso
+    #         Tworzy pod w temp namespace klastra zeby zbudowac ISO ze
+    #         spersonalizowana ignition kierujaca do TEGO klastra.
+    # =========================================================================
+    - name: Resolve pull-secret path
+      ansible.builtin.set_fact:
+        pull_secret_path: "{{ pull_secret_file | replace('~', lookup('env', 'HOME')) }}"
+      tags: [iso]
+
+    - name: "=== GENEROWANIE node.iso ==="
+      ansible.builtin.debug:
+        msg: "oc adm node-image create — kilka minut (pull release image + build ISO)..."
+      tags: [iso]
+
+    - name: Uruchom oc adm node-image create
+      ansible.builtin.command:
+        cmd: >
+          {{ openshift_oc_binary }} adm node-image create
+          --dir={{ node_install_dir }}
+          --output-name={{ node_iso_output }}
+          --registry-config={{ pull_secret_path }}
+      register: node_image_result
+      changed_when: true
+      tags: [iso]
+
+    - name: Sprawdz ze ISO powstal
+      ansible.builtin.stat:
+        path: "{{ node_install_dir }}/{{ node_iso_output }}"
+      register: node_iso_stat
+      tags: [iso]
+
+    - name: Blad — node.iso nie powstal
+      ansible.builtin.fail:
+        msg: |
+          {{ node_install_dir }}/{{ node_iso_output }} nie istnieje po `oc adm node-image create`.
+          Output: {{ node_image_result.stderr | default('brak') }}
+          Sprawdz takze {{ node_install_dir }}/report.json (jezeli istnieje).
+      when: not node_iso_stat.stat.exists
+      tags: [iso]
+
+    - name: Pokaz wygenerowane ISO
+      ansible.builtin.debug:
+        msg: "ISO: {{ node_install_dir }}/{{ node_iso_output }} ({{ (node_iso_stat.stat.size / 1024 / 1024) | round(1) }} MB)"
+      tags: [iso]
+
+    # =========================================================================
+    # Krok 10: Halt nowych VM przed manipulacja DV
+    # =========================================================================
+    - name: Zatrzymaj nowe VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Halted
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [boot]
+
+    - name: Poczekaj az VMI nowych VM znikna
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_gone
+      until: vmi_gone.resources | length == 0
+      retries: 30
+      delay: 5
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [boot]
+
+    # =========================================================================
+    # Krok 11: Synchronizuj DataVolume `node-image-iso` z lokalnym ISO (sha256)
+    #          Logika identyczna co w cdrom/attach-iso.yml, ale na osobnej DV.
+    # =========================================================================
+    - name: Policz SHA256 lokalnego node.iso
+      ansible.builtin.command:
+        cmd: "sha256sum {{ node_install_dir }}/{{ node_iso_output }}"
+      register: node_iso_sha_result
+      changed_when: false
+      tags: [boot]
+
+    - name: Ustal SHA256 node.iso
+      ansible.builtin.set_fact:
+        node_iso_sha256: "{{ node_iso_sha_result.stdout.split()[0] }}"
+      tags: [boot]
+
+    - name: Pobierz info o DV (jezeli istnieje)
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ node_iso_pvc_name }}"
+      register: node_dv_info
+      tags: [boot]
+
+    - name: Wyznacz decyzje DV (upload/skip/replace)
+      ansible.builtin.set_fact:
+        node_dv_exists: "{{ node_dv_info.resources | length > 0 }}"
+        node_dv_sha: >-
+          {{ (node_dv_info.resources[0].metadata.annotations | default({}))['iso-sha256']
+             | default('') if (node_dv_info.resources | length > 0) else '' }}
+      tags: [boot]
+
+    - name: Wyznacz node_dv_needs_upload
+      ansible.builtin.set_fact:
+        node_dv_needs_upload: "{{ (not node_dv_exists) or (node_dv_sha != node_iso_sha256) }}"
+      tags: [boot]
+
+    - name: "=== STATUS node-image DataVolume ==="
+      ansible.builtin.debug:
+        msg: |
+          Lokalny SHA: {{ node_iso_sha256 }}
+          DV SHA:      {{ node_dv_sha if node_dv_exists else 'DV NIE ISTNIEJE' }}
+          Akcja:       {{ 'DELETE+UPLOAD (stale)' if (node_dv_exists and node_dv_needs_upload)
+                            else 'UPLOAD (nie istnieje)' if node_dv_needs_upload
+                            else 'SKIP (juz aktualna)' }}
+      tags: [boot]
+
+    - name: Usun przestarzala DataVolume
+      kubernetes.core.k8s:
+        state: absent
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ node_iso_pvc_name }}"
+        wait: true
+        wait_timeout: 300
+      when:
+        - node_dv_exists
+        - node_dv_needs_upload
+      tags: [boot]
+
+    - name: Upload node.iso do DataVolume przez virtctl
+      ansible.builtin.command:
+        cmd: >
+          virtctl image-upload dv {{ node_iso_pvc_name }}
+          --size=2Gi
+          --image-path={{ node_install_dir }}/{{ node_iso_output }}
+          -n {{ namespace }}
+          --access-mode=ReadWriteMany
+          --insecure
+      when: node_dv_needs_upload
+      tags: [boot]
+
+    - name: Poczekaj na zakonczenie importu DataVolume
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ node_iso_pvc_name }}"
+      register: dv_status_node
+      until: >
+        dv_status_node.resources | length > 0 and
+        dv_status_node.resources[0].status.phase | default('') == 'Succeeded'
+      retries: 30
+      delay: 10
+      when: node_dv_needs_upload
+      tags: [boot]
+
+    - name: Annotuj DV checksumem (znacznik co jest w srodku)
+      kubernetes.core.k8s:
+        state: present
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ node_iso_pvc_name }}"
+        merge_type: merge
+        definition:
+          metadata:
+            annotations:
+              iso-sha256: "{{ node_iso_sha256 }}"
+      when: node_dv_needs_upload
+      tags: [boot]
+
+    # =========================================================================
+    # Krok 12: Patch CDROM + boot order tylko dla additional_nodes
+    # =========================================================================
+    - name: Dodaj CDROM (oc patch) — wylacznie nowe VM
+      ansible.builtin.command:
+        cmd: >
+          {{ openshift_oc_binary }} patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
+            {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
+              {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
+              {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 2}
+            ]},
+            {"op": "replace", "path": "/spec/template/spec/volumes", "value": [
+              {"name": "rootdisk", "dataVolume": {"name": "{{ item.name }}-rootdisk"}},
+              {"name": "cdrom-iso", "dataVolume": {"name": "{{ node_iso_pvc_name }}"}}
+            ]}
+          ]'
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+      tags: [boot]
+
+    # =========================================================================
+    # Krok 13: Start nowych VM
+    # =========================================================================
+    - name: Uruchom nowe VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+        state: present
+        merge_type: merge
+        definition:
+          spec:
+            runStrategy: Always
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [boot]
+
+    - name: Poczekaj az VMI sa Running
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+        name: "{{ item.name }}"
+      register: vmi_run
+      until: >
+        vmi_run.resources | length > 0 and
+        vmi_run.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [boot]
+
+    # =========================================================================
+    # Krok 14: CSR approve loop + czekaj az nowe nody beda Ready.
+    #          Dwie fale CSR: kubelet-client (do registracji Node) i serving.
+    #          Skrypt na kazdej iteracji zatwierdza wszystkie pending CSR-y,
+    #          potem zlicza ile celow jeszcze nie ma Ready=True. `until` konczy
+    #          loop gdy wszystkie nody sa Ready.
+    # =========================================================================
+    - name: Ustal target_hostnames
+      ansible.builtin.set_fact:
+        target_hostnames: "{{ additional_nodes | map(attribute='hostname') | list }}"
+      tags: [ready]
+
+    - name: Wygeneruj skrypt approve-csrs.sh
+      ansible.builtin.copy:
+        dest: "{{ node_install_dir }}/approve-csrs.sh"
+        mode: '0755'
+        content: |
+          #!/usr/bin/env bash
+          set -uo pipefail
+          HOSTS=( {{ target_hostnames | map('quote') | join(' ') }} )
+          {% raw %}
+          pending=$(oc get csr -o go-template='{{range .items}}{{if not .status.conditions}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
+          if [ -n "$pending" ]; then
+            echo "$pending" | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
+          fi
+          not_ready=0
+          for h in "${HOSTS[@]}"; do
+            st=$(oc get node "$h" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            if [ "$st" != "True" ]; then not_ready=$((not_ready+1)); fi
+          done
+          echo "NOT_READY=$not_ready"
+          {% endraw %}
+      tags: [ready]
+
+    - name: "=== CSR APPROVE + WAIT FOR READY ==="
+      ansible.builtin.debug:
+        msg: "Co {{ csr_approve_delay }}s zatwierdzam pending CSR-y i sprawdzam Ready (max ~{{ (csr_approve_retries * csr_approve_delay / 60) | round(1) }} min)"
+      tags: [ready]
+
+    - name: Approve CSR + czekaj az nowe nody beda Ready
+      ansible.builtin.command:
+        cmd: "bash {{ node_install_dir }}/approve-csrs.sh"
+      register: csr_loop
+      until: "'NOT_READY=0' in csr_loop.stdout"
+      retries: "{{ csr_approve_retries }}"
+      delay: "{{ csr_approve_delay }}"
+      changed_when: false
+      tags: [ready]
+
+    # =========================================================================
+    # Krok 15: Podsumowanie
+    # =========================================================================
+    - name: "=== SUKCES ==="
+      ansible.builtin.debug:
+        msg: |
+          Wszystkie nowe nody Ready: {{ target_hostnames | join(', ') }}
+
+          Sprawdzenie:
+            oc get nodes
+            oc get nodes -l '!node-role.kubernetes.io/master'
+
+          CDROM pozostaje podpiety (zgodnie z day-1). Aby odpiac:
+            oc patch vm <name> -n {{ namespace }} --type=json -p '[
+              {"op": "replace", "path": "/spec/template/spec/domain/devices/disks",
+               "value": [{"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1}]},
+              {"op": "replace", "path": "/spec/template/spec/volumes",
+               "value": [{"name": "rootdisk", "dataVolume": {"name": "<name>-rootdisk"}}]}
+            ]'
+            # potem restart VM
+      tags: [ready]

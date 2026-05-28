@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# nodes-config.yaml — wejscie dla `oc adm node-image create`
+# =============================================================================
+# To NIE jest agent-config.yaml. Sluzy do DOLACZENIA nowych nodow do JUZ
+# DZIALAJACEGO klastra (day-2). Brak rendezvousIP, brak definicji control-plane
+# — `oc adm node-image` wyciaga kontekst (API, CA, ignition) z biezacego klastra.
+#
+# Format `hosts:` jest celowo identyczny z sekcja hosts w agent-config.yaml.j2,
+# zeby siec/MAC/IP dzialaly tak samo jak przy pierwszej instalacji.
+#
+# Jak przy create-virt-env: gdy add-nodes.yml zaktualizuje plik klastra MAC-ami,
+# snapshot -e w pamieci jest stale — dlatego renderujemy z host facta
+# `additional_nodes_with_mac`, a fallback to surowe `additional_nodes`.
+# =============================================================================
+{% set effective_nodes = additional_nodes_with_mac | default(additional_nodes) %}
+hosts:
+{% for node in effective_nodes %}
+  - hostname: {{ node.hostname }}
+    interfaces:
+      - name: {{ node_interface_name | default('enp1s0') }}
+        macAddress: {{ node.mac }}
+    rootDeviceHints:
+      deviceName: {{ node.root_disk | default('/dev/vda') }}
+    networkConfig:
+      interfaces:
+        - name: {{ node_interface_name | default('enp1s0') }}
+          type: ethernet
+          state: up
+          mac-address: {{ node.mac }}
+          ipv4:
+            enabled: true
+            address:
+              - ip: {{ node.ip }}
+                prefix-length: {{ machine_network | ansible.utils.ipaddr('prefix') }}
+            dhcp: false
+          ipv6:
+            enabled: false
+      dns-resolver:
+        config:
+          server:
+{% for dns in dns_servers %}
+            - {{ dns }}
+{% endfor %}
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: {{ gateway }}
+            next-hop-interface: {{ node_interface_name | default('enp1s0') }}
+            table-id: 254
+{% endfor %}
