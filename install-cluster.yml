@@ -145,19 +145,20 @@
           so external_lb must be true (platform: none). Got external_lb=false.
       when: lb_mode == 'haproxy'
 
-    # Fail fast: bez hasla AD run doszedlby do Play 3 i dopiero tam pominal domene.
-    - name: AD join needs a bind password (pass via -e or ansible-vault)
-      ansible.builtin.assert:
-        that:
-          - ad_bind_password is defined and ad_bind_password | length > 0
-        fail_msg: |
-          ad_domain={{ ad_domain | default('') }} is configured but ad_bind_password is not set.
-          Unattended runs must supply it, e.g.:
-            -e ad_bind_password='...'      (or use ansible-vault)
-          Without it the HAProxy VM comes up but AD logins will not work.
+    # Haslo AD nie jest tu walidowane celowo: Ansible zapyta o nie interaktywnie
+    # w PHASE 1.5 (vars_prompt w create-rhel-vm.yml). Asercja w tym miejscu
+    # zabijala run, zanim prompt zdazyl sie pojawic.
+    - name: NOTE — AD password will be requested interactively
+      ansible.builtin.debug:
+        msg: |
+          AD integration is enabled (ad_domain={{ ad_domain }}).
+          Ansible will prompt for the bind password when PHASE 1.5 starts.
+          For unattended runs pass it up front instead:
+            -e @vars/secrets.yml --ask-vault-pass   (ansible-vault)
       when:
         - lb_mode == 'haproxy'
         - ad_domain | default('') | length > 0
+        - ad_bind_password is not defined or ad_bind_password | length == 0
 
     - name: Internal LB requires api_vip and ingress_vip
       ansible.builtin.assert:

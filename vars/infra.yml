@@ -41,5 +41,8 @@ rhel_image_pvc: rhel9-base
 # SSH
 # -----------------------------------------------------------------------------
 ssh_user: cloud-user
-ssh_private_key_file: ~/.ssh/id_ed25519
-# ssh_public_key_file: juz zdefiniowany w generate-ocp-agent-iso.yml (~/.ssh/id_ed25519.pub)
+# Para MUSI byc spojna: publiczny ladu je do VM przez cloud-init, prywatnym sie laczymy.
+# Dotyczy tylko VM RHEL/HAProxy — klaster OCP ma wlasny ssh_public_key_file
+# w generate-ocp-agent-iso.yml (ten plik nie jest tam ladowany).
+ssh_private_key_file: ~/.ssh/id_rsa
+ssh_public_key_file: ~/.ssh/id_rsa.pub

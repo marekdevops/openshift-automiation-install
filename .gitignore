@@ -1,0 +1,14 @@
+# Sekrety — hasla AD, klucze aktywacyjne Satellite itp.
+# Trzymane w ansible-vault, ale nigdy nie commitujemy ich nawet zaszyfrowanych.
+vars/secrets.yml
+*.vault
+.vault-pass
+
+# Artefakty instalacji (kubeconfig, kubeadmin-password, ISO)
+install-dir/
+*.iso
+auth/
+
+# Kopie zapasowe robione przez playbooki
+*.bak
+*-backup-*.yaml
