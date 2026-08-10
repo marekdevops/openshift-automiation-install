@@ -64,6 +64,22 @@ ntp_servers:
 external_lb: true
 
 # -----------------------------------------------------------------------------
+# Tryb load balancera dla install-cluster.yml
+# -----------------------------------------------------------------------------
+#   external  PROD — LB juz istnieje (F5 / firmowy HAProxy), my go nie dotykamy.
+#             install-cluster.yml pomija FAZE 1.5.
+#   haproxy   POC / szybki start — ten sam run stawia VM z HAProxy (sekcja haproxy: nizej)
+#             i dopiero potem instaluje klaster. Wymaga -e @vars/infra.yml? NIE —
+#             install-cluster.yml sam laduje vars/infra.yml w trybie haproxy.
+#
+# DNS jest ZAWSZE zewnetrzny — w obu trybach musisz miec wczesniej rekordy:
+#   api.ocp1.example.com       A  <ip LB>
+#   api-int.ocp1.example.com   A  <ip LB>
+#   *.apps.ocp1.example.com    A  <ip LB>
+# Preflight je sprawdza i failuje, jesli ich brak (obejscie: -e dns_strict=false).
+lb_mode: external
+
+# -----------------------------------------------------------------------------
 # Sieci wewnętrzne klastra (zazwyczaj nie zmieniaj)
 # -----------------------------------------------------------------------------
 cluster_network_cidr: 10.128.0.0/14

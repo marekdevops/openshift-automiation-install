@@ -3,21 +3,36 @@
 # install-cluster.yml — end-to-end OpenShift cluster install
 # =============================================================================
 # Single entrypoint that orchestrates the full install:
-#   PHASE 1: Preflight   — validate config, tools, hosting cluster, network
+#   PHASE 1: Preflight   — validate config, tools, hosting cluster, network, DNS
+#   PHASE 1.5: HAProxy   — provision the LB VM   (only when lb_mode: haproxy)
 #   PHASE 2: Create VMs  — provision VMs on OpenShift Virtualization
 #   PHASE 3: Generate ISO— openshift-install agent create image
 #   PHASE 4: Attach ISO  — upload ISO to DV, attach CDROM, boot
 #   PHASE 5: Wait        — bootstrap-complete + install-complete
 #   PHASE 6: Summary     — console URL, API URL, kubeadmin password
 #
+# Two supported shapes, selected by lb_mode in clusters/<name>.yml:
+#
+#   lb_mode: haproxy   POC / quickstart — this run also provisions the LB VM.
+#                      Needs: haproxy: section + vars/infra.yml (RHEL image, SSH key).
+#                      DNS still external: api, api-int, *.apps -> haproxy.ip
+#
+#   lb_mode: external  PRODUCTION — LB (F5 / existing HAProxy) already exists and is
+#                      managed elsewhere. PHASE 1.5 is skipped entirely. Default.
+#
 # Usage:
 #   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml
+#
+# POC quickstart, fully unattended (AD password must be supplied up front):
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml \
+#     -e auto_approve=true -e ad_bind_password='...'
 #
 # Skip interactive confirmation:
 #   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml -e auto_approve=true
 #
 # Run a single phase via tags:
 #   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags preflight
+#   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags lb
 #   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags vms
 #   ansible-playbook install-cluster.yml -e @clusters/ocp1.yml --tags iso,boot,wait
 #
@@ -28,7 +43,8 @@
 #   - SSH public key at ~/.ssh/id_ed25519.pub (or override)
 #   - Namespace exists in hosting cluster
 #   - NetworkAttachmentDefinition (multus_network) exists
-#   - Load balancer + DNS configured externally (api, api-int, *.apps)
+#   - DNS records exist: api, api-int, *.apps  (always external — never created here)
+#   - Load balancer: pre-existing (lb_mode: external) or built by PHASE 1.5 (lb_mode: haproxy)
 #
 # Individual playbooks remain usable for manual step-by-step runs:
 #   create-virt-env.yml, generate-ocp-agent-iso.yml,
@@ -49,6 +65,11 @@
     openshift_install_binary: /usr/local/bin/openshift-install
     pull_secret_file: ~/.openshift/pull-secret.json
     ssh_public_key_file: ~/.ssh/id_ed25519.pub
+    # lb_mode: haproxy  = POC/quickstart — stawiamy wlasna VM z HAProxy (PHASE 1.5)
+    # lb_mode: external = PROD — LB (F5/istniejacy HAProxy) juz istnieje, my go nie ruszamy
+    lb_mode: external
+    # DNS jest ZAWSZE zewnetrzny. Preflight go tylko waliduje i failuje, jesli brak rekordow.
+    dns_strict: true
 
   tasks:
     - name: Banner
@@ -89,6 +110,54 @@
           - (nodes | selectattr('role', 'equalto', 'master') | list | length) >= 3
         fail_msg: |
           Need >= 3 master nodes. Found {{ nodes | selectattr('role', 'equalto', 'master') | list | length }}.
+
+    - name: lb_mode must be 'haproxy' or 'external'
+      ansible.builtin.assert:
+        that:
+          - lb_mode in ['haproxy', 'external']
+        fail_msg: "lb_mode must be 'haproxy' (POC — deploy our own LB VM) or 'external' (got: {{ lb_mode }})"
+
+    # ── lb_mode: haproxy — wymagania dla FAZY 1.5 ──────────────────────────
+    - name: Load infra vars for the HAProxy VM
+      ansible.builtin.include_vars: vars/infra.yml
+      when: lb_mode == 'haproxy'
+
+    - name: HAProxy mode requires the haproxy section and a RHEL image
+      ansible.builtin.assert:
+        that:
+          - haproxy is defined
+          - haproxy.name is defined
+          - haproxy.hostname is defined
+          - haproxy.ip is defined and haproxy.ip | length > 0
+          - rhel_image_url is defined or rhel_image_pvc is defined
+        fail_msg: |
+          lb_mode=haproxy requires:
+            - section 'haproxy:' in clusters/{{ cluster_name }}.yml (name, hostname, ip)
+            - rhel_image_url or rhel_image_pvc in vars/infra.yml
+      when: lb_mode == 'haproxy'
+
+    - name: HAProxy mode requires external_lb=true (platform none, no VIPs)
+      ansible.builtin.assert:
+        that:
+          - external_lb | bool
+        fail_msg: |
+          lb_mode=haproxy means the cluster talks to an out-of-cluster LB,
+          so external_lb must be true (platform: none). Got external_lb=false.
+      when: lb_mode == 'haproxy'
+
+    # Fail fast: bez hasla AD run doszedlby do Play 3 i dopiero tam pominal domene.
+    - name: AD join needs a bind password (pass via -e or ansible-vault)
+      ansible.builtin.assert:
+        that:
+          - ad_bind_password is defined and ad_bind_password | length > 0
+        fail_msg: |
+          ad_domain={{ ad_domain | default('') }} is configured but ad_bind_password is not set.
+          Unattended runs must supply it, e.g.:
+            -e ad_bind_password='...'      (or use ansible-vault)
+          Without it the HAProxy VM comes up but AD logins will not work.
+      when:
+        - lb_mode == 'haproxy'
+        - ad_domain | default('') | length > 0
 
     - name: Internal LB requires api_vip and ingress_vip
       ansible.builtin.assert:
@@ -181,20 +250,55 @@
       register: nad_info
       failed_when: nad_info.resources | length == 0
 
-    # ── DNS sanity (warning only — DNS may be set up later) ────────────────
-    - name: DNS check — api.{{ cluster_name }}.{{ base_domain }}
-      ansible.builtin.command: "getent hosts api.{{ cluster_name }}.{{ base_domain }}"
-      register: dns_api
+    # ── DNS — zawsze zewnetrzny, tu tylko walidowany ───────────────────────
+    # Wildcard *.apps sprawdzamy przez losowa nazwe — musi rozwiazac sie tak samo.
+    - name: DNS check — api / api-int / *.apps
+      ansible.builtin.command: "getent hosts {{ item }}.{{ cluster_name }}.{{ base_domain }}"
+      register: dns_check
       changed_when: false
       failed_when: false
+      loop:
+        - api
+        - api-int
+        - canary-probe.apps
+      loop_control:
+        label: "{{ item }}.{{ cluster_name }}.{{ base_domain }}"
 
-    - name: WARN — API DNS does not resolve yet
-      ansible.builtin.debug:
+    - name: Fail if required DNS records are missing
+      ansible.builtin.fail:
         msg: |
-          WARNING: api.{{ cluster_name }}.{{ base_domain }} does not resolve.
-          Make sure your load balancer + DNS are configured before install-complete
-          (otherwise wait-for install-complete will time out on API health).
-      when: dns_api.rc != 0
+          Missing DNS records (DNS is external — create them before installing):
+          {% for r in dns_check.results | rejectattr('rc', 'equalto', 0) | list %}
+            - {{ r.item }}.{{ cluster_name }}.{{ base_domain }}
+          {% endfor %}
+          {% if lb_mode == 'haproxy' %}
+          All three must point at the HAProxy VM: {{ haproxy.ip }}
+            api.{{ cluster_name }}.{{ base_domain }}       A  {{ haproxy.ip }}
+            api-int.{{ cluster_name }}.{{ base_domain }}   A  {{ haproxy.ip }}
+            *.apps.{{ cluster_name }}.{{ base_domain }}    A  {{ haproxy.ip }}
+          {% else %}
+          Point them at your external load balancer.
+          {% endif %}
+          Override with -e dns_strict=false to continue anyway (install WILL fail later).
+      when:
+        - dns_strict | bool
+        - dns_check.results | rejectattr('rc', 'equalto', 0) | list | length > 0
+
+    # Rekordy istnieja — sprawdz, czy faktycznie celuja w nasza VM z HAProxy.
+    - name: Verify DNS points at the HAProxy VM
+      ansible.builtin.fail:
+        msg: |
+          DNS resolves, but not to the HAProxy VM ({{ haproxy.ip }}):
+          {% for r in dns_check.results | selectattr('rc', 'equalto', 0) | list %}
+            {{ r.item }}.{{ cluster_name }}.{{ base_domain }} -> {{ r.stdout.split()[0] | default('?') }}
+          {% endfor %}
+          Fix the records, or set lb_mode=external if another LB fronts this cluster.
+      when:
+        - dns_strict | bool
+        - lb_mode == 'haproxy'
+        - dns_check.results | selectattr('rc', 'equalto', 0)
+          | map(attribute='stdout') | map('regex_replace', '\s.*$', '')
+          | reject('equalto', haproxy.ip) | list | length > 0
 
     # ── Confirmation ───────────────────────────────────────────────────────
     - name: "Ready to install — review and confirm"
@@ -212,16 +316,32 @@
                          {{ nodes | selectattr('role','equalto','worker') | list | length }} worker(s):
                          {% for n in nodes | selectattr('role','equalto','worker') | list %}  - {{ n.name }} ({{ n.ip }})
                          {% endfor %}{% endif %}
-          Load balancer: {{ 'external (DNS-only, no VIPs)' if (external_lb | bool) else 'internal (keepalived) — api_vip=' ~ api_vip ~ ', ingress_vip=' ~ ingress_vip }}
+          Load balancer: {% if lb_mode == 'haproxy' %}HAProxy VM {{ haproxy.name }} ({{ haproxy.ip }}) — provisioned by this run
+          {% elif external_lb | bool %}external (DNS-only, no VIPs) — must already exist
+          {% else %}internal (keepalived) — api_vip={{ api_vip }}, ingress_vip={{ ingress_vip }}
+          {% endif %}
+          DNS:           external{{ ' (validated -> ' ~ haproxy.ip ~ ')' if lb_mode == 'haproxy' else ' (validated)' }}
           OC context:    {{ oc_user.stdout }}
 
-          Estimated total time: 30-60 min
-          This will: create VMs, generate ISO, boot, wait for install.
+          Estimated total time: {{ '40-75 min' if lb_mode == 'haproxy' else '30-60 min' }}
+          This will: {{ 'deploy the HAProxy LB VM, ' if lb_mode == 'haproxy' else '' }}create VMs, generate ISO, boot, wait for install.
 
     - name: Confirm before proceeding
       ansible.builtin.pause:
         prompt: "Press ENTER to start install, or Ctrl+C to abort"
       when: not (auto_approve | bool)
+
+
+# -----------------------------------------------------------------------------
+# PHASE 1.5 — Deploy the HAProxy load balancer VM (lb_mode: haproxy only)
+# -----------------------------------------------------------------------------
+# Musi byc PRZED faza boot: wezly przy bootstrapie laca do api-int:6443 i :22623.
+# Backendy w haproxy.cfg biora sie ze statycznych IP z nodes[], wiec LB da sie
+# skonfigurowac zanim powstanie jakakolwiek VM klastra — backendy poczekaja na check.
+- name: "PHASE 1.5 — Deploy HAProxy load balancer VM"
+  ansible.builtin.import_playbook: haproxy/deploy-haproxy.yml
+  when: lb_mode | default('external') == 'haproxy'
+  tags: [lb]
 
 
 # -----------------------------------------------------------------------------

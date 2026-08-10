@@ -37,7 +37,17 @@ All playbooks use cluster configuration from `clusters/<name>.yml`:
 ```bash
 # === One-shot end-to-end install ===
 # Preflight + create VMs + ISO + boot + wait, with a confirmation pause.
+# Load balancer handling is driven by `lb_mode` in the cluster config:
+#   lb_mode: external  (default, PROD) — LB already exists, PHASE 1.5 skipped
+#   lb_mode: haproxy   (POC quickstart) — also provisions the HAProxy LB VM first
 ansible-playbook install-cluster.yml -e @clusters/ocp1.yml
+
+# POC quickstart, unattended (AD password must be passed up front, else preflight fails):
+ansible-playbook install-cluster.yml -e @clusters/ocp1.yml \
+  -e lb_mode=haproxy -e auto_approve=true -e ad_bind_password='...'
+
+# Only the load-balancer phase:
+ansible-playbook install-cluster.yml -e @clusters/ocp1.yml -e lb_mode=haproxy --tags lb
 
 # Skip confirmation (CI/automation):
 ansible-playbook install-cluster.yml -e @clusters/ocp1.yml -e auto_approve=true
@@ -93,6 +103,10 @@ namespace: proj-vms
 
 # External LB (F5/HAProxy) - no VIPs needed, uses platform: none
 external_lb: true
+
+# Who provisions the load balancer (install-cluster.yml only)
+lb_mode: external   # PROD: LB pre-exists.  POC: `haproxy` builds the LB VM in PHASE 1.5
+
 
 # Internal LB (keepalived) - requires VIPs
 # external_lb: false

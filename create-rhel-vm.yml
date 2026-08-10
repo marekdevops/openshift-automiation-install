@@ -36,10 +36,14 @@
     ssh_private_key_file: ~/.ssh/id_ed25519
     ssh_user: cloud-user
 
+  # Prompt jest POMIJANY, gdy ad_bind_password przyjdzie z -e lub z ansible-vault.
+  # Dzieki temu ten sam playbook dziala interaktywnie i bezobsługowo (CI, install-cluster.yml).
+  # ENTER bez wpisywania hasla = pomin integracje z AD (Play 3 sie nie wykona).
   vars_prompt:
     - name: ad_bind_password
-      prompt: "Haslo konta AD ({{ ad_bind_user | default('svc-adjoin') }}@{{ ad_domain | default('example.com') }})"
+      prompt: "Haslo konta AD ({{ ad_bind_user | default('svc-adjoin') }}@{{ ad_domain | default('example.com') }}) — ENTER pomija AD"
       private: true
+      default: ""
 
   tasks:
     # =========================================================================
@@ -217,7 +221,17 @@
   tasks:
     - name: Sprawdz czy AD jest skonfigurowane
       ansible.builtin.set_fact:
-        _do_ad: "{{ ad_domain | default('') | length > 0 }}"
+        _do_ad: "{{ (ad_domain | default('') | length > 0) and (ad_bind_password | default('') | length > 0) }}"
+
+    - name: OSTRZEZENIE — ad_domain ustawione, ale brak hasla
+      ansible.builtin.debug:
+        msg: |
+          UWAGA: ad_domain={{ ad_domain }} jest ustawione, ale ad_bind_password jest puste
+          — pomijam dolaczenie do domeny. Logowanie kontami AD NIE bedzie dzialac.
+          Podaj haslo przez -e ad_bind_password=... lub ansible-vault.
+      when:
+        - ad_domain | default('') | length > 0
+        - ad_bind_password | default('') | length == 0
 
     - name: Zainstaluj pakiety do integracji z AD
       ansible.builtin.dnf:
@@ -336,6 +350,15 @@
     # =========================================================================
     # SELinux
     # =========================================================================
+    # Cloud-init tworzy ~/.ssh zanim SELinux przejdzie w enforcing. Jesli obraz bootowal
+    # w trybie permissive, authorized_keys ma zly kontekst i po enforcing sshd nie moze go
+    # odczytac -> "Permission denied (publickey)". Relabel MUSI byc przed enforcing.
+    - name: Napraw konteksty SELinux w ~/.ssh (przed enforcing)
+      ansible.builtin.command:
+        cmd: "restorecon -R -F /home/{{ ssh_user | default('cloud-user') }}/.ssh"
+      changed_when: false
+      failed_when: false
+
     - name: SELinux w trybie enforcing
       ansible.posix.selinux:
         policy: targeted

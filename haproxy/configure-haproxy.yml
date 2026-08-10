@@ -19,6 +19,11 @@
   become: true
   gather_facts: true
 
+  vars:
+    _haproxy_cfg_candidates:
+      - "{{ playbook_dir }}/templates/haproxy.cfg.j2"
+      - "{{ playbook_dir }}/../templates/haproxy.cfg.j2"
+
   tasks:
     # =========================================================================
     # Instalacja HAProxy
@@ -59,7 +64,9 @@
     # =========================================================================
     - name: Wdrozenie konfiguracji HAProxy
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/../templates/haproxy.cfg.j2"
+        # playbook_dir zalezy od tego, skad odpalono run: repo root (install-cluster.yml)
+        # albo haproxy/ (uruchomienie samodzielne). first_found obsluguje oba przypadki.
+        src: "{{ lookup('ansible.builtin.first_found', _haproxy_cfg_candidates) }}"
         dest: /etc/haproxy/haproxy.cfg
         owner: root
         group: root
