@@ -32,20 +32,49 @@
   gather_facts: false
 
   vars:
-    ssh_public_key_file: ~/.ssh/id_ed25519.pub
-    ssh_private_key_file: ~/.ssh/id_ed25519
-    ssh_user: cloud-user
+    # UWAGA: nie ustawiaj tu ssh_*/ad_*/rhel_image_* — zmienne z play-level `vars:`
+    # maja WYZSZY priorytet niz vars/infra.yml i cicho nadpisywalyby konfiguracje.
+    # Wartosci domyslne sa podawane przy uzyciu (| default(...)).
+    _infra_vars_candidates:
+      - "{{ playbook_dir }}/vars/infra.yml"
+      - "{{ playbook_dir }}/../vars/infra.yml"
 
   # Ansible pyta o haslo po starcie runu — nie jest echowane i nie trafia do historii.
   # Prompt jest POMIJANY tylko wtedy, gdy ad_bind_password przyjdzie z -e lub z vaulta
   # (tryb bezobslugowy / CI). ENTER bez wpisywania = pomin integracje z AD.
+  #
+  # Tresc promptu jest CELOWO generyczna: vars_prompt renderuje sie ZANIM zaladuje sie
+  # vars/infra.yml, wiec wstawienie tu ad_bind_user/ad_domain pokazywaloby mylace
+  # wartosci domyslne (svc-adjoin@example.com) zamiast tych z konfiguracji.
   vars_prompt:
     - name: ad_bind_password
-      prompt: "Haslo konta AD ({{ ad_bind_user | default('svc-adjoin') }}@{{ ad_domain | default('example.com') }}) — ENTER pomija AD"
+      prompt: "Haslo konta AD (uzytkownik bind z vars/infra.yml) — ENTER pomija integracje z AD"
       private: true
       default: ""
 
   tasks:
+    # =========================================================================
+    # Zmienne infrastrukturalne
+    # =========================================================================
+    # Ladowane tutaj, a nie tylko w install-cluster.yml: include_vars z innego play
+    # nie jest wiarygodnym zrodlem dla tego play (i przegrywa z play-level vars).
+    # first_found obsluguje oba katalogi startowe: repo root i haproxy/.
+    - name: Znajdz plik vars/infra.yml
+      ansible.builtin.set_fact:
+        _infra_vars_file: "{{ lookup('ansible.builtin.first_found', _infra_vars_candidates, errors='ignore') | default('', true) }}"
+
+    - name: Zaladuj zmienne infrastrukturalne (AD, Satellite, obraz RHEL, klucze SSH)
+      ansible.builtin.include_vars:
+        file: "{{ _infra_vars_file }}"
+      when: _infra_vars_file | length > 0
+
+    - name: INFO — brak vars/infra.yml
+      ansible.builtin.debug:
+        msg: |
+          Nie znaleziono vars/infra.yml — jada wartosci domyslne
+          (klucz ~/.ssh/id_ed25519, bez AD, bez Satellite).
+      when: _infra_vars_file | length == 0
+
     # =========================================================================
     # Walidacja
     # =========================================================================
@@ -140,8 +169,13 @@
         name: rhel_vm
         ansible_host: "{{ vm_ip }}"
         ansible_user: "{{ ssh_user | default('cloud-user') }}"
-        ansible_ssh_private_key_file: "{{ ssh_private_key_file | default('~/.ssh/id_ed25519') }}"
+        # expanduser: '~' rozwijamy sami, zeby sciezka byla poprawna niezaleznie
+        # od tego, jak ssh/ansible potraktuje tylde w IdentityFile.
+        ansible_ssh_private_key_file: "{{ vm_ssh_private_key_file | default(ssh_private_key_file | default('~/.ssh/id_ed25519')) | expanduser }}"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        # Uzywane przez kolejne play (hardening, konfiguracja HAProxy)
+        ssh_user: "{{ ssh_user | default('cloud-user') }}"
+        vm_vlan_interface: "{{ vm_vlan_interface | default('enp2s0') }}"
         # Przekaz zmienne do nastepnych play
         ad_bind_password: "{{ ad_bind_password }}"
         ad_domain: "{{ ad_domain | default('') }}"

@@ -9,7 +9,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     ssh_authorized_keys:
-      - {{ lookup('file', ssh_public_key_file | default('~/.ssh/id_ed25519.pub')) | trim }}
+      - {{ lookup('file', vm_ssh_public_key_file | default(ssh_public_key_file | default('~/.ssh/id_ed25519.pub')) | expanduser) | trim }}
 
 chpasswd:
   expire: false

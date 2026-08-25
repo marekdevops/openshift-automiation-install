@@ -136,6 +136,34 @@
             - rhel_image_url or rhel_image_pvc in vars/infra.yml
       when: lb_mode == 'haproxy'
 
+    # Klucz do VM RHEL jest ODDZIELNY od klucza klastra OCP (vm_ssh_* w vars/infra.yml).
+    # Bez pary klucz publiczny/prywatny cloud-init wgra co innego, niz czym sie laczymy,
+    # i PHASE 1.5 padnie dopiero na "Permission denied (publickey)".
+    - name: VM SSH key pair exists (HAProxy VM)
+      ansible.builtin.stat:
+        path: "{{ item | expanduser }}"
+      register: vm_key_stat
+      loop:
+        - "{{ vm_ssh_public_key_file | default('~/.ssh/id_ed25519.pub') }}"
+        - "{{ vm_ssh_private_key_file | default('~/.ssh/id_ed25519') }}"
+      loop_control:
+        label: "{{ item }}"
+      when: lb_mode == 'haproxy'
+
+    - name: Fail if the VM SSH key pair is missing
+      ansible.builtin.fail:
+        msg: |
+          Missing SSH key file(s) for the HAProxy VM:
+          {% for r in vm_key_stat.results | rejectattr('stat.exists') | list %}
+            - {{ r.item }}
+          {% endfor %}
+          Set vm_ssh_public_key_file / vm_ssh_private_key_file in vars/infra.yml
+          (they must be a matching pair — the public key is injected via cloud-init,
+          the private key is what Ansible connects with).
+      when:
+        - lb_mode == 'haproxy'
+        - vm_key_stat.results | rejectattr('stat.exists') | list | length > 0
+
     - name: HAProxy mode requires external_lb=true (platform none, no VIPs)
       ansible.builtin.assert:
         that:
@@ -144,6 +172,15 @@
           lb_mode=haproxy means the cluster talks to an out-of-cluster LB,
           so external_lb must be true (platform: none). Got external_lb=false.
       when: lb_mode == 'haproxy'
+
+    # Czy FAZA 1.5 faktycznie sie wykona w TYM runie? lb_mode to za malo —
+    # user moze odpalic z --skip-tags lb albo --tags vms,iso i wtedy LB nie powstaje.
+    - name: Determine whether PHASE 1.5 (LB) runs in this invocation
+      ansible.builtin.set_fact:
+        _lb_phase_runs: >-
+          {{ lb_mode == 'haproxy'
+             and 'lb' not in ansible_skip_tags
+             and ('all' in ansible_run_tags or 'lb' in ansible_run_tags) }}
 
     # Haslo AD nie jest tu walidowane celowo: Ansible zapyta o nie interaktywnie
     # w PHASE 1.5 (vars_prompt w create-rhel-vm.yml). Asercja w tym miejscu
@@ -156,9 +193,23 @@
           For unattended runs pass it up front instead:
             -e @vars/secrets.yml --ask-vault-pass   (ansible-vault)
       when:
-        - lb_mode == 'haproxy'
+        - _lb_phase_runs | bool
         - ad_domain | default('') | length > 0
         - ad_bind_password is not defined or ad_bind_password | length == 0
+
+    # Prompt z create-rhel-vm.yml odpala sie na starcie tego play NIEZALEZNIE od
+    # tagow i od `when:` przy import_playbook (Ansible pyta zanim odfiltruje taski).
+    # Jesli LB w tym runie nie powstaje, uprzedz usera, ze moze wcisnac ENTER.
+    - name: NOTE — an AD password prompt will appear but PHASE 1.5 is not running
+      ansible.builtin.debug:
+        msg: |
+          PHASE 1.5 (HAProxy) will NOT run in this invocation.
+          Ansible still shows the AD password prompt from create-rhel-vm.yml —
+          just press ENTER, nothing from that phase will execute.
+          To silence it: -e ad_bind_password=''
+      when:
+        - not (_lb_phase_runs | bool)
+        - ad_bind_password is not defined
 
     - name: Internal LB requires api_vip and ingress_vip
       ansible.builtin.assert:
