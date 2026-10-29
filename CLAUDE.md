@@ -72,6 +72,11 @@ ansible-playbook cdrom/bootorder.yml -e @clusters/ocp1.yml
 # Monitor installation
 ansible-playbook wait-ocp-install.yml -e @clusters/ocp1.yml
 
+# === Day-2: add workers (automation- or Assisted-installed clusters, OCP >= 4.17) ===
+# Needs target_kubeconfig in the cluster file; VMs go to the active oc login (hosting cluster)
+ansible-playbook get-cluster-oc.yml -e @clusters/cluster-1.yml   # live version + matching oc
+ansible-playbook add-nodes.yml -e @clusters/cluster-1.yml
+
 # === CDROM Management ===
 
 # Add CDROM to VMs without it

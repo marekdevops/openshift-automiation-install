@@ -95,6 +95,8 @@ ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml
 | `generate-ocp-agent-iso.yml` | Generates Agent-Based Installer ISO |
 | `wait-ocp-install.yml` | Monitors installation progress |
 | `diagnose-vm.yml` | Diagnoses VM configuration issues |
+| `add-nodes.yml` | Day-2: adds workers to a running cluster (`oc adm node-image`) |
+| `get-cluster-oc.yml` | Reads the target cluster's live version and fetches a matching `oc` |
 
 ### CDROM Management (`cdrom/`)
 
@@ -139,6 +141,31 @@ ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml -e stage=bootst
 # Wait for complete installation (default)
 ansible-playbook wait-ocp-install.yml -e @clusters/mycluster.yml -e stage=complete
 ```
+
+## Adding workers (day-2)
+
+Works for clusters installed by this automation **and** by Assisted Installer
+(console.redhat.com), OCP >= 4.17. Two kubeconfigs are involved:
+
+- `hosting_kubeconfig` — the OpenShift Virtualization cluster where the VMs live
+  (defaults to `$KUBECONFIG` / `~/.kube/config`, i.e. your `oc login`)
+- `target_kubeconfig` — the cluster the worker joins (required in the cluster file)
+
+```bash
+# Live version + health of the target cluster, fetch matching oc to ~/.cache/ocp-clients/<ver>/
+ansible-playbook get-cluster-oc.yml -e @clusters/cluster-1.yml
+
+# Add the workers listed under additional_nodes:
+ansible-playbook add-nodes.yml -e @clusters/cluster-1.yml
+```
+
+The cluster version is never pinned: every run reads `ClusterVersion`, uses an
+`oc` client of exactly that version, and builds a fresh node ISO from the
+cluster's own release image. The run refuses to start while the cluster is
+upgrading (`-e allow_during_upgrade=true` overrides). Hostname/IP collisions are
+checked against the live node list, and only CSRs for the new hostnames are
+approved. For an Assisted Installer cluster, start from `clusters/example-assisted.yml`
+(no `nodes:` section needed).
 
 ## Configuration
 

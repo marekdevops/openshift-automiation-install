@@ -13,18 +13,32 @@
 #   --tags preflight,mac,vm,render,iso        # + generowanie node.iso (bez bootu)
 #   (pelny przebieg bez tagow)                # cala droga az nowe nody beda Ready
 #
+# Dwa klastry, dwa kubeconfigi:
+#   hosting_kubeconfig — klaster OCP Virt, na ktorym powstaja VM-ki
+#                        (domyslnie $KUBECONFIG albo ~/.kube/config, czyli `oc login`)
+#   target_kubeconfig  — klaster, DO KTOREGO dolaczamy workera (wymagany w pliku klastra)
+#
+# Dziala dla klastrow z tej automatyzacji ORAZ z Assisted Installera
+# (console.redhat.com) — `oc adm node-image` bierze API/CA/ignition z
+# dzialajacego klastra, niezaleznie od sposobu instalacji. Sekcja `nodes:`
+# nie jest wymagana — wystarczy minimalny plik klastra.
+#
+# Wersja: czytana na biezaco z ClusterVersion klastra docelowego. Klient oc
+# w tej samej wersji jest dociagany do ~/.cache/ocp-clients/<wersja>/oc
+# (patrz get-cluster-oc.yml), a node.iso budowane jest przy kazdym uruchomieniu
+# z release image klastra — nic nie trzeba pobierac recznie.
+#
 # Wymagania:
-#   - Klaster juz zainstalowany (oc whoami zwraca aktualnego usera)
+#   - Klaster docelowy OCP >= 4.17, stabilny (bez trwajacego upgrade)
 #   - additional_nodes: zdefiniowane w clusters/<n>.yml (tylko role: worker)
 #   - pull-secret w ~/.openshift/pull-secret.json (dla --registry-config)
 #   - virtctl (upload node.iso do DataVolume)
-#   - oc (OCP >= 4.17 — wspiera `oc adm node-image`)
 #
 # Izolacja od day-1 (NIC NIE PSUJE DOTYCHCZASOWEGO FLOW):
 #   - Czyta `additional_nodes:` (NIE `nodes:`)
 #   - Asset dir: /tmp/ocp-node-add/<cluster>  (NIE /tmp/ocp-install/<cluster>)
-#   - ISO: node.iso (NIE agent.x86_64.iso)
-#   - DataVolume: node-image-iso  (NIE iso_pvc_name = agent-iso-pvc)
+#   - ISO: node-<wersja>.iso (NIE agent.x86_64.iso)
+#   - DataVolume: <cluster>-node-iso-<sha>  (NIE iso_pvc_name = agent-iso-pvc)
 #   - Host fact MAC-ow: additional_nodes_with_mac (NIE nodes_with_mac)
 #   - Komenda: oc adm node-image create  (NIE openshift-install agent create image)
 # =============================================================================
@@ -37,12 +51,18 @@
   vars:
     cluster_config_file: "{{ lookup('env', 'PWD') }}/clusters/{{ cluster_name }}.yml"
     node_install_dir: "/tmp/ocp-node-add/{{ cluster_name }}"
-    node_iso_output: node.iso
-    node_iso_pvc_name: node-image-iso
+    node_iso_output: "node-{{ target_ocp_version }}.iso"
     pull_secret_file: ~/.openshift/pull-secret.json
     openshift_oc_binary: oc
+    hosting_kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
     csr_approve_retries: 80    # 80 * 15s = 20 min
     csr_approve_delay: 15
+
+  # Wszystkie moduly kubernetes.core (VM, DV, VMI) ida do klastra HOSTUJACEGO.
+  # Klaster docelowy obslugujemy wylacznie przez {{ target_oc }} + KUBECONFIG.
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ hosting_kubeconfig | expanduser }}"
 
   tasks:
     # =========================================================================
@@ -82,11 +102,13 @@
         label: "{{ item.name | default('?') }}"
       tags: [preflight]
 
+    # `nodes:` istnieje tylko dla klastrow z tej automatyzacji — dla klastrow
+    # z Assisted Installera sprawdzamy wylacznie zywa liste nodow nizej.
     - name: Walidacja — nazwy nie koliduja z `nodes:`
       ansible.builtin.assert:
         that:
-          - item.name not in (nodes | map(attribute='name') | list)
-          - item.hostname not in (nodes | map(attribute='hostname') | list)
+          - item.name not in (nodes | default([]) | map(attribute='name') | list)
+          - item.hostname not in (nodes | default([]) | map(attribute='hostname') | list)
         fail_msg: |
           Kolizja: '{{ item.name }}'/'{{ item.hostname }}' wystepuje juz w `nodes:`.
           additional_nodes musi miec unikalne nazwy/hostname-y wzgledem listy day-1.
@@ -97,7 +119,7 @@
 
     - name: Walidacja — pull-secret istnieje
       ansible.builtin.stat:
-        path: "{{ pull_secret_file | replace('~', lookup('env', 'HOME')) }}"
+        path: "{{ pull_secret_file | expanduser }}"
       register: ps_check
       tags: [preflight]
 
@@ -109,16 +131,43 @@
       when: not ps_check.stat.exists
       tags: [preflight]
 
-    - name: Walidacja — oc zalogowany do klastra
-      ansible.builtin.command:
-        cmd: "{{ openshift_oc_binary }} whoami"
-      register: oc_whoami
-      changed_when: false
+    # Facty klastra docelowego i target_oc sa potrzebne takze w fazach iso/ready,
+    # dlatego te kroki ida zawsze, niezaleznie od --tags.
+    - name: Odczytaj stan klastra docelowego (wersja, upgrade, nody)
+      ansible.builtin.include_tasks:
+        file: tasks/target-cluster-facts.yml
+        apply:
+          tags: [always]
+      tags: [always]
+
+    - name: Dociagnij oc w wersji klastra docelowego
+      ansible.builtin.include_tasks:
+        file: tasks/ensure-oc-client.yml
+        apply:
+          tags: [always]
+      tags: [always]
+
+    # Rerun po udanym dolaczeniu tez tu sie zatrzyma — to celowe: dolaczony
+    # node przenies z additional_nodes do nodes (albo usun z pliku).
+    - name: Walidacja — hostname/IP nie sa juz zajete w klastrze docelowym
+      ansible.builtin.assert:
+        that:
+          - item.hostname not in target_node_names
+          - target_node_names | select('match', (item.hostname | regex_escape) ~ '[.]') | list | length == 0
+          - item.ip not in target_node_ips
+        fail_msg: |
+          '{{ item.hostname }}' ({{ item.ip }}) jest juz nodem klastra {{ cluster_name }}
+          albo jego IP jest zajete. Nody klastra: {{ target_node_names | join(', ') }}
+      loop: "{{ additional_nodes }}"
+      loop_control:
+        label: "{{ item.hostname }} / {{ item.ip }}"
       tags: [preflight]
 
-    - name: "=== KONTEKST OC ==="
-      ansible.builtin.debug:
-        msg: "oc user: {{ oc_whoami.stdout }}"
+    - name: Walidacja — IP w additional_nodes sa unikalne
+      ansible.builtin.assert:
+        that:
+          - (additional_nodes | map(attribute='ip') | list | unique | length) == (additional_nodes | length)
+        fail_msg: "Zduplikowane IP w additional_nodes: {{ additional_nodes | map(attribute='ip') | list }}"
       tags: [preflight]
 
     # =========================================================================
@@ -370,21 +419,23 @@
     # =========================================================================
     - name: Resolve pull-secret path
       ansible.builtin.set_fact:
-        pull_secret_path: "{{ pull_secret_file | replace('~', lookup('env', 'HOME')) }}"
+        pull_secret_path: "{{ pull_secret_file | expanduser }}"
       tags: [iso]
 
-    - name: "=== GENEROWANIE node.iso ==="
+    - name: "=== GENEROWANIE {{ node_iso_output }} ==="
       ansible.builtin.debug:
-        msg: "oc adm node-image create — kilka minut (pull release image + build ISO)..."
+        msg: "oc adm node-image create (OCP {{ target_ocp_version }}) — kilka minut (pull release image + build ISO)..."
       tags: [iso]
 
     - name: Uruchom oc adm node-image create
       ansible.builtin.command:
         cmd: >
-          {{ openshift_oc_binary }} adm node-image create
+          {{ target_oc }} adm node-image create
           --dir={{ node_install_dir }}
           --output-name={{ node_iso_output }}
           --registry-config={{ pull_secret_path }}
+      environment:
+        KUBECONFIG: "{{ target_kubeconfig_path }}"
       register: node_image_result
       changed_when: true
       tags: [iso]
@@ -444,19 +495,23 @@
       tags: [boot]
 
     # =========================================================================
-    # Krok 11: Synchronizuj DataVolume `node-image-iso` z lokalnym ISO (sha256)
-    #          Logika identyczna co w cdrom/attach-iso.yml, ale na osobnej DV.
+    # Krok 11: DataVolume z node ISO.
+    #          Nazwa zawiera sha256 ISO, wiec kazde nowe ISO (nowa wersja klastra,
+    #          inne nody) to nowa DV — nie kasujemy DV, ktora moze byc jeszcze
+    #          podpieta jako CDROM do wczesniej dodanego workera. Stare DV tego
+    #          klastra sprzatamy tylko, gdy zadna VMI ich nie uzywa.
     # =========================================================================
-    - name: Policz SHA256 lokalnego node.iso
+    - name: Policz SHA256 lokalnego ISO
       ansible.builtin.command:
         cmd: "sha256sum {{ node_install_dir }}/{{ node_iso_output }}"
       register: node_iso_sha_result
       changed_when: false
       tags: [boot]
 
-    - name: Ustal SHA256 node.iso
+    - name: Ustal SHA256 i nazwe DV
       ansible.builtin.set_fact:
         node_iso_sha256: "{{ node_iso_sha_result.stdout.split()[0] }}"
+        node_iso_pvc_name: "{{ cluster_name }}-node-iso-{{ node_iso_sha_result.stdout.split()[0][:10] }}"
       tags: [boot]
 
     - name: Pobierz info o DV (jezeli istnieje)
@@ -468,30 +523,24 @@
       register: node_dv_info
       tags: [boot]
 
-    - name: Wyznacz decyzje DV (upload/skip/replace)
-      ansible.builtin.set_fact:
-        node_dv_exists: "{{ node_dv_info.resources | length > 0 }}"
-        node_dv_sha: >-
-          {{ (node_dv_info.resources[0].metadata.annotations | default({}))['iso-sha256']
-             | default('') if (node_dv_info.resources | length > 0) else '' }}
-      tags: [boot]
-
     - name: Wyznacz node_dv_needs_upload
       ansible.builtin.set_fact:
-        node_dv_needs_upload: "{{ (not node_dv_exists) or (node_dv_sha != node_iso_sha256) }}"
+        node_dv_needs_upload: >-
+          {{ node_dv_info.resources | length == 0 or
+             node_dv_info.resources[0].status.phase | default('') != 'Succeeded' }}
       tags: [boot]
 
-    - name: "=== STATUS node-image DataVolume ==="
+    - name: "=== STATUS node ISO DataVolume ==="
       ansible.builtin.debug:
         msg: |
-          Lokalny SHA: {{ node_iso_sha256 }}
-          DV SHA:      {{ node_dv_sha if node_dv_exists else 'DV NIE ISTNIEJE' }}
-          Akcja:       {{ 'DELETE+UPLOAD (stale)' if (node_dv_exists and node_dv_needs_upload)
-                            else 'UPLOAD (nie istnieje)' if node_dv_needs_upload
-                            else 'SKIP (juz aktualna)' }}
+          ISO:    {{ node_iso_output }} (OCP {{ target_ocp_version }})
+          SHA:    {{ node_iso_sha256 }}
+          DV:     {{ node_iso_pvc_name }}
+          Akcja:  {{ 'UPLOAD' if node_dv_needs_upload else 'SKIP (ta sama zawartosc juz jest)' }}
       tags: [boot]
 
-    - name: Usun przestarzala DataVolume
+    # Niedokonczony upload z przerwanego runu — zaczynamy od zera.
+    - name: Usun niedokonczona DV
       kubernetes.core.k8s:
         state: absent
         api_version: cdi.kubevirt.io/v1beta1
@@ -501,14 +550,15 @@
         wait: true
         wait_timeout: 300
       when:
-        - node_dv_exists
         - node_dv_needs_upload
+        - node_dv_info.resources | length > 0
       tags: [boot]
 
-    - name: Upload node.iso do DataVolume przez virtctl
+    - name: Upload ISO do DataVolume przez virtctl
       ansible.builtin.command:
         cmd: >
           virtctl image-upload dv {{ node_iso_pvc_name }}
+          --kubeconfig={{ hosting_kubeconfig | expanduser }}
           --size=2Gi
           --image-path={{ node_install_dir }}/{{ node_iso_output }}
           -n {{ namespace }}
@@ -532,7 +582,7 @@
       when: node_dv_needs_upload
       tags: [boot]
 
-    - name: Annotuj DV checksumem (znacznik co jest w srodku)
+    - name: Oznacz DV (klaster, wersja, checksum)
       kubernetes.core.k8s:
         state: present
         api_version: cdi.kubevirt.io/v1beta1
@@ -542,9 +592,43 @@
         merge_type: merge
         definition:
           metadata:
+            labels:
+              ocp-automation/node-iso-cluster: "{{ cluster_name }}"
             annotations:
               iso-sha256: "{{ node_iso_sha256 }}"
-      when: node_dv_needs_upload
+              ocp-version: "{{ target_ocp_version }}"
+      tags: [boot]
+
+    - name: Pobierz stare node ISO DV tego klastra
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        label_selectors:
+          - "ocp-automation/node-iso-cluster={{ cluster_name }}"
+      register: old_node_dvs
+      tags: [boot]
+
+    - name: Pobierz VMI w namespace (kto uzywa ktorej DV)
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ namespace }}"
+      register: ns_vmis
+      tags: [boot]
+
+    - name: Usun stare node ISO DV nieuzywane przez zadna VMI
+      kubernetes.core.k8s:
+        state: absent
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ namespace }}"
+        name: "{{ item }}"
+      loop: "{{ old_node_dvs.resources | map(attribute='metadata.name') | reject('equalto', node_iso_pvc_name) | reject('in', dv_in_use) | list }}"
+      vars:
+        dv_in_use: >-
+          {{ ns_vmis.resources | map(attribute='spec.volumes') | flatten
+             | selectattr('dataVolume', 'defined') | map(attribute='dataVolume.name') | list }}
       tags: [boot]
 
     # =========================================================================
@@ -553,7 +637,8 @@
     - name: Dodaj CDROM (oc patch) — wylacznie nowe VM
       ansible.builtin.command:
         cmd: >
-          {{ openshift_oc_binary }} patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
+          {{ openshift_oc_binary }} --kubeconfig={{ hosting_kubeconfig | expanduser }}
+          patch vm {{ item.name }} -n {{ namespace }} --type=json -p='[
             {"op": "replace", "path": "/spec/template/spec/domain/devices/disks", "value": [
               {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
               {"name": "cdrom-iso", "cdrom": {"bus": "sata"}, "bootOrder": 2}
@@ -607,10 +692,10 @@
 
     # =========================================================================
     # Krok 14: CSR approve loop + czekaj az nowe nody beda Ready.
-    #          Dwie fale CSR: kubelet-client (do registracji Node) i serving.
-    #          Skrypt na kazdej iteracji zatwierdza wszystkie pending CSR-y,
-    #          potem zlicza ile celow jeszcze nie ma Ready=True. `until` konczy
-    #          loop gdy wszystkie nody sa Ready.
+    #          Dwie fale CSR: kubelet-client (od node-bootstrappera, CN w
+    #          requeście) i serving (od system:node:<host>). Zatwierdzamy
+    #          WYLACZNIE CSR-y, ktorych CN to system:node:<nasz hostname> —
+    #          inne pending CSR-y w klastrze zostaja nietkniete.
     # =========================================================================
     - name: Ustal target_hostnames
       ansible.builtin.set_fact:
@@ -624,15 +709,29 @@
         content: |
           #!/usr/bin/env bash
           set -uo pipefail
+          export KUBECONFIG={{ target_kubeconfig_path | quote }}
+          OC={{ target_oc | quote }}
           HOSTS=( {{ target_hostnames | map('quote') | join(' ') }} )
+          BOOTSTRAPPER="system:serviceaccount:openshift-machine-config-operator:node-bootstrapper"
           {% raw %}
-          pending=$(oc get csr -o go-template='{{range .items}}{{if not .status.conditions}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
-          if [ -n "$pending" ]; then
-            echo "$pending" | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
-          fi
+          is_ours() {
+            local cn=$1 h
+            for h in "${HOSTS[@]}"; do
+              [[ "$cn" == "system:node:$h" || "$cn" == system:node:"$h".* ]] && return 0
+            done
+            return 1
+          }
+          "$OC" get csr -o go-template='{{range .items}}{{if not .status.conditions}}{{.metadata.name}} {{.spec.username}} {{.spec.request}}{{"\n"}}{{end}}{{end}}' 2>/dev/null |
+          while read -r name user req; do
+            cn=$(echo "$req" | base64 -d 2>/dev/null | openssl req -noout -subject 2>/dev/null | sed -n 's/.*CN *= *//p')
+            is_ours "$cn" || continue
+            # client CSR musi przyjsc od bootstrappera, serving — od samego noda
+            [[ "$user" == "$BOOTSTRAPPER" || "$user" == "$cn" ]] || continue
+            "$OC" adm certificate approve "$name" >/dev/null 2>&1 && echo "APPROVED $name ($cn)"
+          done
           not_ready=0
           for h in "${HOSTS[@]}"; do
-            st=$(oc get node "$h" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            st=$("$OC" get node "$h" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
             if [ "$st" != "True" ]; then not_ready=$((not_ready+1)); fi
           done
           echo "NOT_READY=$not_ready"
@@ -641,7 +740,7 @@
 
     - name: "=== CSR APPROVE + WAIT FOR READY ==="
       ansible.builtin.debug:
-        msg: "Co {{ csr_approve_delay }}s zatwierdzam pending CSR-y i sprawdzam Ready (max ~{{ (csr_approve_retries * csr_approve_delay / 60) | round(1) }} min)"
+        msg: "Co {{ csr_approve_delay }}s zatwierdzam pending CSR-y i sprawdzam Ready (max ~{{ (csr_approve_retries | int * csr_approve_delay | int / 60) | round(1) }} min)"
       tags: [ready]
 
     - name: Approve CSR + czekaj az nowe nody beda Ready
@@ -662,9 +761,11 @@
         msg: |
           Wszystkie nowe nody Ready: {{ target_hostnames | join(', ') }}
 
+          Wersja klastra: {{ target_ocp_version }}
+
           Sprawdzenie:
-            oc get nodes
-            oc get nodes -l '!node-role.kubernetes.io/master'
+            KUBECONFIG={{ target_kubeconfig_path }} {{ target_oc }} get nodes
+            KUBECONFIG={{ target_kubeconfig_path }} {{ target_oc }} get nodes -l '!node-role.kubernetes.io/master'
 
           CDROM pozostaje podpiety (zgodnie z day-1). Aby odpiac:
             oc patch vm <name> -n {{ namespace }} --type=json -p '[

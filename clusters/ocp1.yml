@@ -136,6 +136,11 @@ nodes:
 # Uzycie:
 #   ansible-playbook add-nodes.yml -e @clusters/ocp1.yml
 #
+# Kubeconfig klastra DOCELOWEGO (VM-ki ida na aktywny `oc login` / hosting_kubeconfig).
+# Po instalacji przez install-cluster.yml: /tmp/ocp-install/ocp1/auth/kubeconfig
+# (skopiuj go w trwale miejsce — /tmp nie przetrwa restartu).
+# target_kubeconfig: ~/.kube/clusters/ocp1
+#
 # additional_nodes:
 #   - name: ocp1-worker-1
 #     hostname: worker-1

@@ -1,0 +1,58 @@
+---
+# =============================================================================
+# Wzor: klaster zainstalowany z Assisted Installera (console.redhat.com)
+# =============================================================================
+# Minimalny plik tylko do day-2 (add-nodes.yml). Brak `nodes:` — klaster nie
+# powstal z tej automatyzacji, a kolizje nazw/IP sprawdzamy na zywej liscie
+# nodow klastra docelowego.
+#
+# Skopiuj jako clusters/<nazwa>.yml (nazwa pliku = cluster_name), uzupelnij i:
+#   ansible-playbook get-cluster-oc.yml -e @clusters/<nazwa>.yml   # wersja + stan
+#   ansible-playbook add-nodes.yml     -e @clusters/<nazwa>.yml   # dodanie workera
+#
+# Wartosci sieci/VM najlatwiej odczytac z istniejacego workera:
+#   oc get vm <worker> -n <ns> -o yaml          # namespace, multus, cpu/ram/dysk
+#   KUBECONFIG=<target> oc debug node/<worker> -- chroot /host ip -4 a   # NIC, prefix
+#   KUBECONFIG=<target> oc debug node/<worker> -- chroot /host ip r      # gateway
+# =============================================================================
+
+cluster_name: example-assisted
+
+# Kubeconfig klastra, DO KTOREGO dodajemy workera (pobrany z console.redhat.com)
+target_kubeconfig: ~/.kube/clusters/example-assisted
+
+# Opcjonalnie: kubeconfig klastra OCP Virt z VM-kami (domyslnie aktywny `oc login`)
+# hosting_kubeconfig: ~/.kube/config
+
+# -----------------------------------------------------------------------------
+# VM - OpenShift Virtualization (klaster hostujacy)
+# -----------------------------------------------------------------------------
+namespace: proj-vms
+multus_network: default/vlan214-net
+
+vm_defaults:
+  cpu_sockets: 8
+  memory: 32Gi
+  disk_size: 120Gi
+  max_cpu_sockets: 16
+  max_memory: 64Gi
+
+# -----------------------------------------------------------------------------
+# Siec workera
+# -----------------------------------------------------------------------------
+machine_network: 192.168.214.0/24
+gateway: 192.168.214.1
+node_interface_name: enp1s0    # jedyny NIC VM z vm-worker-large.yaml.j2
+
+dns_servers:
+  - 192.168.214.1
+
+# -----------------------------------------------------------------------------
+# Nowe workery (MAC uzupelni sie automatycznie)
+# -----------------------------------------------------------------------------
+additional_nodes:
+  - name: example-assisted-worker-3
+    hostname: worker-3
+    role: worker
+    mac: ""
+    ip: 192.168.214.23

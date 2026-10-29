@@ -1,0 +1,95 @@
+---
+# =============================================================================
+# Klient oc w wersji IDENTYCZNEJ z klastrem docelowym
+# =============================================================================
+# Uzywane przez: add-nodes.yml, get-cluster-oc.yml
+# Wymaga: target_ocp_version, target_release_image, target_kubeconfig_path
+#         (ustawiane przez tasks/target-cluster-facts.yml)
+#
+# Wyjscie: target_oc — sciezka do oc pasujacego do klastra
+#
+# Cache: ~/.cache/ocp-clients/<wersja>/oc — pobierane raz na wersje.
+# Zrodla (po kolei):
+#   1. mirror.openshift.com (z weryfikacja sha256sum.txt)
+#   2. fallback: `oc adm release extract --command=oc` z release image klastra
+#      (dziala tez bez dostepu do mirror.openshift.com, jesli jest dostep do rejestru)
+# =============================================================================
+
+- name: Ustal sciezki cache klienta oc
+  ansible.builtin.set_fact:
+    oc_cache_dir: "{{ (oc_client_cache | default('~/.cache/ocp-clients')) | expanduser }}/{{ target_ocp_version }}"
+    oc_mirror_base: "https://mirror.openshift.com/pub/openshift-v4/{{ oc_client_arch | default('x86_64') }}/clients/ocp/{{ target_ocp_version }}"
+    oc_tarball: "openshift-client-linux-{{ target_ocp_version }}.tar.gz"
+
+- name: Sprawdz czy oc {{ target_ocp_version }} jest w cache
+  ansible.builtin.stat:
+    path: "{{ oc_cache_dir }}/oc"
+  register: oc_cached
+
+- name: Pobierz oc {{ target_ocp_version }}
+  when: not oc_cached.stat.exists
+  block:
+    - name: Utworz katalog cache
+      ansible.builtin.file:
+        path: "{{ oc_cache_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Pobierz {{ oc_tarball }} z mirror.openshift.com
+      ansible.builtin.get_url:
+        url: "{{ oc_mirror_base }}/{{ oc_tarball }}"
+        dest: "{{ oc_cache_dir }}/{{ oc_tarball }}"
+        checksum: "sha256:{{ oc_mirror_base }}/sha256sum.txt"
+        mode: '0644'
+        timeout: 60
+
+    - name: Rozpakuj oc
+      ansible.builtin.unarchive:
+        src: "{{ oc_cache_dir }}/{{ oc_tarball }}"
+        dest: "{{ oc_cache_dir }}"
+        remote_src: true
+        include: [oc]
+
+    - name: Usun tarball
+      ansible.builtin.file:
+        path: "{{ oc_cache_dir }}/{{ oc_tarball }}"
+        state: absent
+
+  rescue:
+    - name: Mirror niedostepny — wyciagam oc z release image klastra
+      ansible.builtin.debug:
+        msg: "Fallback: oc adm release extract --command=oc z {{ target_release_image }}"
+
+    - name: oc adm release extract --command=oc
+      ansible.builtin.command:
+        cmd: >
+          {{ openshift_oc_binary | default('oc') }} adm release extract
+          --command=oc
+          --to={{ oc_cache_dir }}
+          --registry-config={{ pull_secret_file | expanduser }}
+          {{ target_release_image }}
+      environment:
+        KUBECONFIG: "{{ target_kubeconfig_path }}"
+      changed_when: true
+
+- name: Sprawdz wersje pobranego oc
+  ansible.builtin.command:
+    cmd: "{{ oc_cache_dir }}/oc version --client -o json"
+  register: oc_client_version_raw
+  changed_when: false
+
+- name: Walidacja — oc ma wersje klastra
+  ansible.builtin.assert:
+    that:
+      - client_ver == target_ocp_version
+    fail_msg: "{{ oc_cache_dir }}/oc ma wersje '{{ client_ver }}', klaster {{ target_ocp_version }}. Usun {{ oc_cache_dir }} i odpal ponownie."
+  vars:
+    client_ver: "{{ (oc_client_version_raw.stdout | from_json).releaseClientVersion | default('') }}"
+
+- name: Ustal target_oc
+  ansible.builtin.set_fact:
+    target_oc: "{{ oc_cache_dir }}/oc"
+
+- name: "=== KLIENT oc ==="
+  ansible.builtin.debug:
+    msg: "oc {{ target_ocp_version }}: {{ target_oc }} ({{ 'z cache' if oc_cached.stat.exists else 'pobrany teraz' }})"

@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# Odczyt stanu klastra DOCELOWEGO (tego, do ktorego dolaczamy nody)
+# =============================================================================
+# Uzywane przez: add-nodes.yml, get-cluster-oc.yml
+#
+# Wejscie:
+#   target_kubeconfig      — kubeconfig klastra docelowego (wymagany)
+#   hosting_kubeconfig     — kubeconfig klastra z VM (opcjonalny, do porownania)
+#   allow_during_upgrade   — true pozwala dzialac w trakcie upgrade (domyslnie false)
+#
+# Wyjscie (facty):
+#   target_kubeconfig_path, target_ocp_version, target_release_image,
+#   target_ocp_channel, target_platform, target_api_url,
+#   target_node_names, target_node_ips
+#
+# Wersja NIE jest nigdzie zapisana na sztywno — za kazdym razem czytamy
+# ClusterVersion, wiec 4.21.17 dzis i 4.21.20 jutro dzialaja tak samo.
+# =============================================================================
+
+- name: Walidacja — target_kubeconfig zdefiniowany
+  ansible.builtin.assert:
+    that:
+      - target_kubeconfig is defined
+      - target_kubeconfig | length > 0
+    fail_msg: |
+      Brak `target_kubeconfig:` w pliku klastra.
+      To kubeconfig klastra, DO KTOREGO dodajesz nody (nie klastra z VM-kami).
+      Przyklad: target_kubeconfig: ~/.kube/clusters/{{ cluster_name }}
+
+- name: Rozwin sciezke target_kubeconfig
+  ansible.builtin.set_fact:
+    target_kubeconfig_path: "{{ target_kubeconfig | expanduser }}"
+
+- name: Walidacja — plik target_kubeconfig istnieje
+  ansible.builtin.stat:
+    path: "{{ target_kubeconfig_path }}"
+  register: target_kc_stat
+
+- name: Blad — brak pliku target_kubeconfig
+  ansible.builtin.fail:
+    msg: "Nie znaleziono {{ target_kubeconfig_path }}"
+  when: not target_kc_stat.stat.exists
+
+# Do samego odczytu wystarczy dowolny oc — wersjonowany klient jest dociagany
+# dopiero pozniej (tasks/ensure-oc-client.yml), bo do tego potrzebna jest wersja.
+- name: Pobierz ClusterVersion klastra docelowego
+  ansible.builtin.command:
+    cmd: "{{ openshift_oc_binary | default('oc') }} get clusterversion version -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_cv_raw
+  changed_when: false
+
+- name: Pobierz Infrastructure klastra docelowego
+  ansible.builtin.command:
+    cmd: "{{ openshift_oc_binary | default('oc') }} get infrastructure cluster -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_infra_raw
+  changed_when: false
+
+- name: Pobierz MachineConfigPool worker
+  ansible.builtin.command:
+    cmd: "{{ openshift_oc_binary | default('oc') }} get mcp worker -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_mcp_raw
+  changed_when: false
+
+- name: Pobierz liste nodow klastra docelowego
+  ansible.builtin.command:
+    cmd: "{{ openshift_oc_binary | default('oc') }} get nodes -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_nodes_raw
+  changed_when: false
+
+- name: Ustal facty klastra docelowego
+  ansible.builtin.set_fact:
+    target_ocp_version: "{{ cv.status.desired.version }}"
+    target_release_image: "{{ cv.status.desired.image }}"
+    target_ocp_channel: "{{ cv.spec.channel | default('brak') }}"
+    target_cv_progressing: "{{ (cv.status.conditions | selectattr('type', 'equalto', 'Progressing') | map(attribute='status') | first | default('Unknown')) == 'True' }}"
+    target_cv_failing: "{{ (cv.status.conditions | selectattr('type', 'equalto', 'Failing') | map(attribute='status') | first | default('False')) == 'True' }}"
+    target_platform: "{{ infra.status.platformStatus.type | default(infra.status.platform | default('Unknown')) }}"
+    target_api_url: "{{ infra.status.apiServerURL }}"
+    target_mcp_updating: "{{ (mcp.status.conditions | selectattr('type', 'equalto', 'Updating') | map(attribute='status') | first | default('False')) == 'True' }}"
+    target_mcp_degraded: "{{ (mcp.status.conditions | selectattr('type', 'equalto', 'Degraded') | map(attribute='status') | first | default('False')) == 'True' }}"
+    target_node_names: "{{ nodes_list | map(attribute='metadata.name') | list }}"
+    target_node_ips: >-
+      {{ nodes_list | map(attribute='status.addresses') | flatten
+         | selectattr('type', 'equalto', 'InternalIP') | map(attribute='address') | list }}
+  vars:
+    cv: "{{ target_cv_raw.stdout | from_json }}"
+    infra: "{{ target_infra_raw.stdout | from_json }}"
+    mcp: "{{ target_mcp_raw.stdout | from_json }}"
+    nodes_list: "{{ (target_nodes_raw.stdout | from_json)['items'] }}"
+
+- name: "=== KLASTER DOCELOWY ==="
+  ansible.builtin.debug:
+    msg: |
+      API:        {{ target_api_url }}
+      Wersja:     {{ target_ocp_version }}  (kanal: {{ target_ocp_channel }})
+      Release:    {{ target_release_image }}
+      Platforma:  {{ target_platform }}
+      Nody:       {{ target_node_names | length }}
+      Upgrade:    {{ 'TRWA' if target_cv_progressing else 'nie' }} | MCP worker: {{ 'UPDATING' if target_mcp_updating else 'stabilny' }}{{ ' DEGRADED' if target_mcp_degraded else '' }}
+
+- name: Walidacja — wersja klastra wspiera oc adm node-image (>= 4.17)
+  ansible.builtin.assert:
+    that:
+      - target_ocp_version is version('4.17', '>=')
+    fail_msg: |
+      Klaster ma {{ target_ocp_version }}, a `oc adm node-image` jest GA od 4.17.
+      Dla starszych klastrow zostaje Assisted Installer (console.redhat.com).
+
+- name: Walidacja — klaster nie jest w trakcie upgrade
+  ansible.builtin.assert:
+    that:
+      - not target_cv_progressing
+      - not target_cv_failing
+      - not target_mcp_updating
+      - not target_mcp_degraded
+    fail_msg: |
+      Klaster nie jest w stabilnym stanie (upgrade / MCP worker w trakcie zmian / degraded).
+      Nowy node dolaczony teraz zlapie wersje w polowie rolloutu.
+      Poczekaj na koniec upgrade albo wymus: -e allow_during_upgrade=true
+  when: not (allow_during_upgrade | default(false) | bool)
+
+- name: Ostrzezenie — platforma inna niz typowa dla VM na KubeVirt
+  ansible.builtin.debug:
+    msg: "UWAGA: platforma {{ target_platform }} — sciezka testowana dla None/BareMetal. Kontynuuje."
+  when: target_platform not in ['None', 'BareMetal', 'External']
+
+# Ochrona przed pomyleniem kubeconfigow: VM-ki tworzymy na klastrze hostujacym,
+# nody dolaczamy do klastra docelowego. To musza byc dwa rozne API.
+- name: Odczytaj API klastra hostujacego
+  ansible.builtin.command:
+    cmd: "{{ openshift_oc_binary | default('oc') }} whoami --show-server"
+  environment:
+    KUBECONFIG: "{{ hosting_kubeconfig | expanduser }}"
+  register: hosting_server
+  changed_when: false
+  when: hosting_kubeconfig is defined
+
+- name: Walidacja — klaster hostujacy != klaster docelowy
+  ansible.builtin.assert:
+    that:
+      - (hosting_server.stdout | trim | regex_replace('/$', '')) != (target_api_url | regex_replace('/$', ''))
+    fail_msg: |
+      hosting_kubeconfig i target_kubeconfig wskazuja na ten sam klaster ({{ target_api_url }}).
+      hosting = klaster OCP Virt z VM-kami, target = klaster, do ktorego dodajesz workera.
+  when: hosting_kubeconfig is defined

@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# Playbook pomocniczy: wersja klastra + pasujacy klient oc
+# =============================================================================
+# Uzycie:
+#   ansible-playbook get-cluster-oc.yml -e @clusters/cluster-1.yml
+#
+# Czyta aktualna wersje klastra (ClusterVersion) z target_kubeconfig, sprawdza
+# czy klaster jest stabilny i dociaga oc w dokladnie tej wersji do
+# ~/.cache/ocp-clients/<wersja>/oc. Nic nie zmienia w klastrach.
+#
+# ISO do dolaczenia noda NIE jest pobierane z sieci — `oc adm node-image create`
+# buduje je z release image dzialajacego klastra, wiec zawsze ma jego wersje.
+# Generuje je add-nodes.yml przy kazdym uruchomieniu.
+#
+# Przydatne tez recznie, np.:
+#   KUBECONFIG=~/.kube/clusters/cluster-1 ~/.cache/ocp-clients/4.21.17/oc get nodes
+# =============================================================================
+
+- name: Wersja klastra + klient oc
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    pull_secret_file: ~/.openshift/pull-secret.json
+    # Raport ma pokazac stan nawet w trakcie upgrade — nie blokujemy.
+    allow_during_upgrade: true
+
+  tasks:
+    - name: Odczytaj stan klastra docelowego
+      ansible.builtin.include_tasks: tasks/target-cluster-facts.yml
+
+    - name: Dociagnij oc w wersji klastra
+      ansible.builtin.include_tasks: tasks/ensure-oc-client.yml
+
+    - name: "=== GOTOWE ==="
+      ansible.builtin.debug:
+        msg: |
+          Klaster {{ cluster_name }}: {{ target_ocp_version }}
+          Stan: {{ 'UPGRADE W TOKU — add-nodes.yml odmowi startu' if (target_cv_progressing or target_mcp_updating) else 'stabilny, mozna dodawac nody' }}
+
+          KUBECONFIG={{ target_kubeconfig_path }} {{ target_oc }} get nodes
