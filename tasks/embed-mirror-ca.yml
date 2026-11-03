@@ -1,0 +1,166 @@
+---
+# =============================================================================
+# Dopisanie CA mirrorow do ignition wbudowanej w node.iso
+# =============================================================================
+# Uzywane przez: add-nodes.yml (po `oc adm node-image create`)
+# Wymaga: target_mirror_ca (z tasks/target-mirror-ca.yml), node_install_dir,
+#         node_iso_output
+#
+# Klaster docelowy NIE jest modyfikowany — zmieniamy wylacznie plik ISO.
+# Do ignition live ISO (srodowisko agenta) dochodza:
+#   /etc/containers/certs.d/<host:port>/ca.crt          — podman/containers-image
+#   /etc/pki/ca-trust/source/anchors/mirror-registry-ca.crt — systemowy trust
+#     (coreos-update-ca-trust.service w RHCOS przebudowuje bundle przy boocie)
+# Po instalacji na dysk node dostaje ignition z MCS klastra, ktora juz zawiera
+# CA mirrorow (MCO), wiec tu potrzebny jest tylko etap live ISO.
+#
+# Narzedzie: coreos-installer (iso ignition show/embed). Kolejnosc szukania:
+#   1. -e coreos_installer_binary=/sciezka
+#   2. coreos-installer w PATH
+#   3. cache ~/.cache/ocp-clients/coreos-installer/ (pobierany z mirror.openshift.com
+#      z weryfikacja sha256sum.txt)
+# =============================================================================
+
+- name: Szukaj coreos-installer w PATH
+  ansible.builtin.command:
+    cmd: "which coreos-installer"
+  register: ci_which
+  changed_when: false
+  failed_when: false
+  when: coreos_installer_binary | default('') | length == 0
+
+- name: Ustal sciezki coreos-installer
+  ansible.builtin.set_fact:
+    ci_cache_dir: "{{ (oc_client_cache | default('~/.cache/ocp-clients')) | expanduser }}/coreos-installer"
+    ci_mirror_base: "https://mirror.openshift.com/pub/openshift-v4/clients/coreos-installer/latest"
+    ci_mirror_file: "coreos-installer_{{ coreos_installer_arch | default('amd64') }}"
+    coreos_installer: >-
+      {{ coreos_installer_binary | default('', true)
+         or (ci_which.stdout | default('') | trim)
+         or ((oc_client_cache | default('~/.cache/ocp-clients')) | expanduser) ~ '/coreos-installer/coreos-installer' }}
+
+- name: Pobierz coreos-installer do cache
+  when:
+    - coreos_installer == ci_cache_dir ~ '/coreos-installer'
+  block:
+    - name: Utworz katalog cache coreos-installer
+      ansible.builtin.file:
+        path: "{{ ci_cache_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Pobierz {{ ci_mirror_file }} z mirror.openshift.com
+      ansible.builtin.get_url:
+        url: "{{ ci_mirror_base }}/{{ ci_mirror_file }}"
+        dest: "{{ coreos_installer }}"
+        checksum: "sha256:{{ ci_mirror_base }}/sha256sum.txt"
+        mode: '0755'
+        timeout: 60
+
+  rescue:
+    - name: Blad — brak coreos-installer
+      ansible.builtin.fail:
+        msg: |
+          Nie udalo sie pobrac coreos-installer z {{ ci_mirror_base }}.
+          Wskaz go recznie: -e coreos_installer_binary=/sciezka/coreos-installer
+          Bez tego CA mirrora nie trafi do node.iso i agent dostanie x509.
+          (Alternatywnie: -e node_iso_inject_mirror_ca=false, jesli wiesz co robisz.)
+
+- name: Sprawdz czy coreos-installer dziala
+  ansible.builtin.command:
+    cmd: "{{ coreos_installer }} --version"
+  register: ci_version
+  changed_when: false
+  failed_when: false
+
+- name: Blad — coreos-installer nie startuje
+  ansible.builtin.fail:
+    msg: |
+      {{ coreos_installer }} nie uruchamia sie (rc={{ ci_version.rc }}):
+      {{ ci_version.stderr | default('') }}
+      Binarka z mirror.openshift.com jest budowana pod RHEL — na innej dystrybucji
+      moze brakowac bibliotek. Zainstaluj coreos-installer z pakietow systemu
+      albo wskaz dzialajacy: -e coreos_installer_binary=/sciezka
+  when: ci_version.rc != 0
+
+- name: Odczytaj ignition wbudowana w {{ node_iso_output }}
+  ansible.builtin.command:
+    cmd: "{{ coreos_installer }} iso ignition show {{ node_install_dir }}/{{ node_iso_output }}"
+  register: node_iso_ign_raw
+  changed_when: false
+
+- name: Wpis ignition — systemowy anchor ze wszystkimi CA mirrorow
+  ansible.builtin.set_fact:
+    mirror_ca_ign_files:
+      - path: /etc/pki/ca-trust/source/anchors/mirror-registry-ca.crt
+        mode: 420
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8;base64,{{ target_mirror_ca | map(attribute='pem') | join('\n') | b64encode }}"
+
+- name: Wpisy ignition — certs.d per mirror
+  ansible.builtin.set_fact:
+    mirror_ca_ign_files: >-
+      {{ mirror_ca_ign_files + [{
+           'path': '/etc/containers/certs.d/' ~ item.registry ~ '/ca.crt',
+           'mode': 420, 'overwrite': true,
+           'contents': {'source': 'data:text/plain;charset=utf-8;base64,' ~ (item.pem | b64encode)}}] }}
+  loop: "{{ target_mirror_ca }}"
+  loop_control:
+    label: "{{ item.registry }}"
+
+# Ignition odrzuca zduplikowane sciezki — najpierw usuwamy ewentualne stare
+# wpisy o tych samych path (np. przy podwojnym wstrzyknieciu).
+- name: Polacz CA z ignition node.iso
+  ansible.builtin.set_fact:
+    node_iso_ign_new: >-
+      {{ ign | combine({'storage': (ign.storage | default({}))
+         | combine({'files': (ign.storage.files | default([])
+                              | rejectattr('path', 'in', mirror_ca_ign_files | map(attribute='path') | list)
+                              | list) + mirror_ca_ign_files})}) }}
+  vars:
+    ign: "{{ node_iso_ign_raw.stdout | from_json }}"
+
+- name: Zapisz zmodyfikowana ignition
+  ansible.builtin.copy:
+    content: "{{ node_iso_ign_new | to_json }}"
+    dest: "{{ node_install_dir }}/node-iso-with-mirror-ca.ign"
+    mode: '0600'
+
+- name: Wbuduj ignition z CA do {{ node_iso_output }}
+  ansible.builtin.command:
+    cmd: >
+      {{ coreos_installer }} iso ignition embed --force
+      --ignition-file {{ node_install_dir }}/node-iso-with-mirror-ca.ign
+      {{ node_install_dir }}/{{ node_iso_output }}
+  changed_when: true
+
+# Weryfikacja na samym ISO — nie ufamy, ze embed sie udal, dopoki nie
+# odczytamy z powrotem tych samych tresci.
+- name: Odczytaj ignition po wbudowaniu
+  ansible.builtin.command:
+    cmd: "{{ coreos_installer }} iso ignition show {{ node_install_dir }}/{{ node_iso_output }}"
+  register: node_iso_ign_check
+  changed_when: false
+
+- name: Walidacja — CA mirrorow sa w ignition node.iso
+  ansible.builtin.assert:
+    that:
+      - item.contents.source in (embedded_files | selectattr('path', 'equalto', item.path) | map(attribute='contents.source') | list)
+    fail_msg: "W node.iso brakuje {{ item.path }} po embed — przerwano."
+    quiet: true
+  vars:
+    embedded_files: "{{ ((node_iso_ign_check.stdout | from_json).storage | default({})).files | default([]) }}"
+  loop: "{{ mirror_ca_ign_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: "=== CA MIRRORA W node.iso ==="
+  ansible.builtin.debug:
+    msg: |
+      Wstrzyknieto CA dla: {{ target_mirror_ca | map(attribute='registry') | join(', ') }}
+      Pliki w live ISO:
+      {% for f in mirror_ca_ign_files %}
+        - {{ f.path }}
+      {% endfor %}
+      Klaster docelowy bez zmian (brak rolloutu MCO).

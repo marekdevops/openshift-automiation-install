@@ -33,6 +33,12 @@
 #   - additional_nodes: zdefiniowane w clusters/<n>.yml (tylko role: worker)
 #   - pull-secret w ~/.openshift/pull-secret.json (dla --registry-config)
 #   - virtctl (upload node.iso do DataVolume)
+#   - coreos-installer — tylko gdy klaster ma mirror z CA w additionalTrustedCA
+#     (pobierany automatycznie do ~/.cache/ocp-clients/coreos-installer/)
+#
+# Mirror rejestru (disconnected / oc-mirror): node-image przenosi do ISO mirrory,
+# ale nie CA z image.config additionalTrustedCA. Krok 9b dopisuje te CA do
+# ignition node.iso — klaster docelowy tylko czytamy, zero rolloutu MCO.
 #
 # Izolacja od day-1 (NIC NIE PSUJE DOTYCHCZASOWEGO FLOW):
 #   - Czyta `additional_nodes:` (NIE `nodes:`)
@@ -146,6 +152,15 @@
         apply:
           tags: [always]
       tags: [always]
+
+    # Tylko odczyt: mirrory (IDMS/ITMS/ICSP) i CA z image.config additionalTrustedCA.
+    # Wynik uzywa krok 9b — klaster docelowy nie jest modyfikowany.
+    - name: Odczytaj mirrory rejestru i ich CA (klaster docelowy)
+      ansible.builtin.include_tasks:
+        file: tasks/target-mirror-ca.yml
+        apply:
+          tags: [preflight, iso]
+      tags: [preflight, iso]
 
     # Rerun po udanym dolaczeniu tez tu sie zatrzyma — to celowe: dolaczony
     # node przenies z additional_nodes do nodes (albo usun z pliku).
@@ -458,6 +473,20 @@
     - name: Pokaz wygenerowane ISO
       ansible.builtin.debug:
         msg: "ISO: {{ node_install_dir }}/{{ node_iso_output }} ({{ (node_iso_stat.stat.size / 1024 / 1024) | round(1) }} MB)"
+      tags: [iso]
+
+    # =========================================================================
+    # Krok 9b: CA mirrora do ignition node.iso
+    #          node-image przenosi mirrory, ale nie CA z additionalTrustedCA —
+    #          dopisujemy je do live ISO zamiast zmieniac klaster (zero rolloutu).
+    #          Wylaczenie: -e node_iso_inject_mirror_ca=false
+    # =========================================================================
+    - name: Wstrzyknij CA mirrora do node.iso
+      ansible.builtin.include_tasks:
+        file: tasks/embed-mirror-ca.yml
+        apply:
+          tags: [iso]
+      when: target_mirror_ca_needed | bool
       tags: [iso]
 
     # =========================================================================

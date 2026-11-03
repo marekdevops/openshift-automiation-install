@@ -167,6 +167,17 @@ checked against the live node list, and only CSRs for the new hostnames are
 approved. For an Assisted Installer cluster, start from `clusters/example-assisted.yml`
 (no `nodes:` section needed).
 
+**Mirror registry (disconnected / `oc-mirror`).** `oc adm node-image create`
+copies the cluster's IDMS/ITMS/ICSP mirrors into the ISO, but not the mirror CA
+configured through `image.config.openshift.io/cluster` → `additionalTrustedCA`,
+so the agent on the live ISO fails with `x509: certificate signed by unknown
+authority`. `add-nodes.yml` reads (never writes) those CAs from the target
+cluster and embeds them into the ISO's ignition (`/etc/containers/certs.d/<registry>/ca.crt`
+plus a system trust anchor) using `coreos-installer`, then verifies they are in
+the ISO. No change to the cluster, no MachineConfig rollout. `coreos-installer`
+is taken from `-e coreos_installer_binary=...`, `PATH`, or downloaded (sha256-verified)
+to `~/.cache/ocp-clients/coreos-installer/`. Disable with `-e node_iso_inject_mirror_ca=false`.
+
 ## Configuration
 
 All configuration is in `clusters/<name>.yml`:

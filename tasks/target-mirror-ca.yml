@@ -1,0 +1,118 @@
+---
+# =============================================================================
+# Mirrory rejestru klastra DOCELOWEGO i CA, ktorym klaster im ufa (TYLKO ODCZYT)
+# =============================================================================
+# Uzywane przez: add-nodes.yml
+# Wymaga: target_oc, target_kubeconfig_path
+#
+# Problem: `oc adm node-image create` przenosi do ISO mirrory (IDMS/ITMS/ICSP)
+# oraz CA z openshift-config/user-ca-bundle — ale NIE CA podpiete przez
+# image.config.openshift.io/cluster -> spec.additionalTrustedCA. Dzialajace nody
+# ufaja mirrorowi (MCO wrzuca CA do /etc/docker/certs.d), a agent na live ISO
+# nie — konczy sie `x509: certificate signed by unknown authority`.
+#
+# Ten plik niczego w klastrze nie zmienia — tylko czyta. Wynik konsumuje
+# tasks/embed-mirror-ca.yml, ktory dopisuje CA do ignition w node.iso.
+#
+# Wyjscie (facty):
+#   target_mirror_hosts     — lista host[:port] mirrorow z IDMS/ITMS/ICSP
+#   target_mirror_ca        — lista {registry, pem} dla mirrorow z additionalTrustedCA
+#   target_mirror_ca_needed — true gdy jest co wstrzykiwac do ISO
+# =============================================================================
+
+- name: Odczytaj IDMS / ITMS / ICSP klastra docelowego
+  ansible.builtin.command:
+    cmd: "{{ target_oc }} get {{ item }} -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  loop:
+    - imagedigestmirrorsets.config.openshift.io
+    - imagetagmirrorsets.config.openshift.io
+    - imagecontentsourcepolicies.operator.openshift.io
+  register: target_mirror_sets_raw
+  changed_when: false
+  failed_when: false   # brak CRD (np. ICSP w przyszlych wersjach) to nie blad
+
+- name: Ustal liste hostow mirrorow
+  ansible.builtin.set_fact:
+    target_mirror_hosts: >-
+      {{ (mirror_items | map(attribute='spec.imageDigestMirrors', default=[]) | flatten
+          + mirror_items | map(attribute='spec.imageTagMirrors', default=[]) | flatten
+          + mirror_items | map(attribute='spec.repositoryDigestMirrors', default=[]) | flatten)
+         | map(attribute='mirrors', default=[]) | flatten
+         | map('regex_replace', '/.*$', '') | unique | list }}
+  vars:
+    mirror_items: >-
+      {{ target_mirror_sets_raw.results | selectattr('rc', 'equalto', 0)
+         | map(attribute='stdout') | map('from_json') | map(attribute='items') | flatten }}
+
+- name: Odczytaj image.config.openshift.io/cluster
+  ansible.builtin.command:
+    cmd: "{{ target_oc }} get image.config.openshift.io cluster -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_image_config_raw
+  changed_when: false
+
+- name: Ustal configmape additionalTrustedCA
+  ansible.builtin.set_fact:
+    target_trusted_ca_cm: "{{ (target_image_config_raw.stdout | from_json).spec.additionalTrustedCA.name | default('') }}"
+
+- name: Odczytaj configmape additionalTrustedCA
+  ansible.builtin.command:
+    cmd: "{{ target_oc }} get configmap {{ target_trusted_ca_cm }} -n openshift-config -o json"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_trusted_ca_raw
+  changed_when: false
+  when: target_trusted_ca_cm | length > 0
+
+- name: Sprawdz czy istnieje openshift-config/user-ca-bundle
+  ansible.builtin.command:
+    cmd: "{{ target_oc }} get configmap user-ca-bundle -n openshift-config -o name"
+  environment:
+    KUBECONFIG: "{{ target_kubeconfig_path }}"
+  register: target_user_ca_bundle_raw
+  changed_when: false
+  failed_when: false
+
+# Klucze w configmapie additionalTrustedCA: "host" albo "host..port"
+# (dwie kropki zamiast dwukropka). Bierzemy tylko wpisy dla mirrorow.
+- name: Inicjalizuj target_mirror_ca
+  ansible.builtin.set_fact:
+    target_mirror_ca: []
+
+- name: Zbierz CA mirrorow z additionalTrustedCA
+  ansible.builtin.set_fact:
+    target_mirror_ca: >-
+      {{ target_mirror_ca + [{'registry': item.key | replace('..', ':'), 'pem': item.value}] }}
+  loop: "{{ ((target_trusted_ca_raw.stdout | default('{}') | from_json).data | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key | replace('..', ':') }}"
+  when: (item.key | replace('..', ':')) in target_mirror_hosts
+
+- name: Ustal target_mirror_ca_needed
+  ansible.builtin.set_fact:
+    target_mirror_ca_needed: >-
+      {{ (node_iso_inject_mirror_ca | default(true) | bool)
+         and (target_mirror_ca | length > 0) }}
+
+- name: "=== MIRRORY REJESTRU KLASTRA DOCELOWEGO ==="
+  ansible.builtin.debug:
+    msg: |
+      Mirrory (IDMS/ITMS/ICSP): {{ target_mirror_hosts | join(', ') if target_mirror_hosts else 'brak — instalacja z rejestrow zrodlowych' }}
+      additionalTrustedCA:      {{ target_trusted_ca_cm if target_trusted_ca_cm else 'brak' }}
+      user-ca-bundle:           {{ 'jest (node-image wlaczy je do ISO sam)' if target_user_ca_bundle_raw.rc == 0 else 'brak' }}
+      CA do wstrzykniecia:      {{ target_mirror_ca | map(attribute='registry') | join(', ') if target_mirror_ca else 'brak' }}
+      Akcja:                    {{ 'CA mirrorow zostana dopisane do ignition node.iso (klaster bez zmian)' if target_mirror_ca_needed else 'nic do zrobienia' }}
+
+- name: Ostrzezenie — mirror bez CA w additionalTrustedCA
+  ansible.builtin.debug:
+    msg: |
+      UWAGA: mirror(y) {{ missing | join(', ') }} nie maja wpisu w additionalTrustedCA.
+      Jesli ich certyfikat nie jest z publicznego CA ani z user-ca-bundle,
+      agent na node.iso dostanie x509. Wtedy sprawdz na VM:
+        journalctl -b | grep -i x509
+  vars:
+    missing: "{{ target_mirror_hosts | difference(target_mirror_ca | map(attribute='registry') | list) }}"
+  when: missing | length > 0
