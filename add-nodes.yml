@@ -153,6 +153,15 @@
           tags: [always]
       tags: [always]
 
+    # Nazwy nodow: domena doklejana z cluster_name + base_domain, gdy klaster
+    # uzywa FQDN (typowe dla Assisted). Potrzebne w render i ready — zawsze.
+    - name: Ustal efektywne hostname-y nowych nodow
+      ansible.builtin.include_tasks:
+        file: tasks/node-hostnames.yml
+        apply:
+          tags: [always]
+      tags: [always]
+
     # Tylko odczyt: mirrory (IDMS/ITMS/ICSP) i CA z image.config additionalTrustedCA.
     # Wynik uzywa krok 9b — klaster docelowy nie jest modyfikowany.
     - name: Odczytaj mirrory rejestru i ich CA (klaster docelowy)
@@ -167,15 +176,15 @@
     - name: Walidacja — hostname/IP nie sa juz zajete w klastrze docelowym
       ansible.builtin.assert:
         that:
-          - item.hostname not in target_node_names
+          - node_hostname_map[item.name] not in target_node_names
           - target_node_names | select('match', (item.hostname | regex_escape) ~ '[.]') | list | length == 0
           - item.ip not in target_node_ips
         fail_msg: |
-          '{{ item.hostname }}' ({{ item.ip }}) jest juz nodem klastra {{ cluster_name }}
+          '{{ node_hostname_map[item.name] }}' ({{ item.ip }}) jest juz nodem klastra {{ cluster_name }}
           albo jego IP jest zajete. Nody klastra: {{ target_node_names | join(', ') }}
       loop: "{{ additional_nodes }}"
       loop_control:
-        label: "{{ item.hostname }} / {{ item.ip }}"
+        label: "{{ node_hostname_map[item.name] }} / {{ item.ip }}"
       tags: [preflight]
 
     - name: Walidacja — IP w additional_nodes sa unikalne
@@ -386,7 +395,7 @@
 
     - name: Buduj additional_nodes_with_mac
       ansible.builtin.set_fact:
-        additional_nodes_with_mac: "{{ additional_nodes_with_mac + [item | combine({'mac': vm_mac_map[item.name]})] }}"
+        additional_nodes_with_mac: "{{ additional_nodes_with_mac + [item | combine({'mac': vm_mac_map[item.name], 'hostname': node_hostname_map[item.name]})] }}"
       loop: "{{ additional_nodes }}"
       loop_control:
         label: "{{ item.name }}"
@@ -728,7 +737,7 @@
     # =========================================================================
     - name: Ustal target_hostnames
       ansible.builtin.set_fact:
-        target_hostnames: "{{ additional_nodes | map(attribute='hostname') | list }}"
+        target_hostnames: "{{ node_hostname_map.values() | list }}"
       tags: [ready]
 
     - name: Wygeneruj skrypt approve-csrs.sh

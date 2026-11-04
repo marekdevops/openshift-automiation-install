@@ -1,0 +1,122 @@
+---
+# =============================================================================
+# Efektywne hostname-y nowych nodow (DRY + zgodnosc z konwencja klastra)
+# =============================================================================
+# Uzywane przez: add-nodes.yml
+# Wymaga: additional_nodes, cluster_name, target_node_names, target_api_url
+#         (base_domain — gdy klaster uzywa FQDN)
+#
+# `hostname` w nodes-config.yaml staje sie nazwa noda w klastrze. Klaster z
+# Assisted Installera ma zwykle nazwy FQDN (z DHCP / reverse DNS), np.
+# worker-1.ocp1.example.com, a klaster z tej automatyzacji — krotkie (worker-0).
+# Zamiast powielac domene w kazdym wpisie additional_nodes, sklejamy ja z
+# cluster_name + base_domain, ktore juz sa w pliku klastra.
+#
+# Styl (node_hostname_style):
+#   auto  (domyslnie) — wykryj z nazw istniejacych nodow klastra docelowego
+#   fqdn  — <hostname>.<cluster_name>.<base_domain>
+#   short — <hostname> bez zmian
+# Hostname z kropka w pliku (juz FQDN) nie jest doklejany — musi jednak pasowac
+# do wykrytej konwencji.
+#
+# Wyjscie (facty):
+#   node_hostname_suffix  — <cluster_name>.<base_domain> (albo '' gdy brak base_domain)
+#   node_hostname_mode    — fqdn | short (po rozstrzygnieciu auto)
+#   node_hostname_map     — {vm name: efektywny hostname}
+# =============================================================================
+
+- name: Ustal sufiks domeny nodow
+  ansible.builtin.set_fact:
+    node_hostname_suffix: "{{ (cluster_name ~ '.' ~ base_domain) if (base_domain | default('') | length > 0) else '' }}"
+    node_hostname_style_req: "{{ node_hostname_style | default('auto') }}"
+
+- name: Walidacja — node_hostname_style ma poprawna wartosc
+  ansible.builtin.assert:
+    that: node_hostname_style_req in ['auto', 'fqdn', 'short']
+    fail_msg: "node_hostname_style='{{ node_hostname_style_req }}' — dozwolone: auto, fqdn, short"
+
+# Sufiks z pliku musi zgadzac sie z prawdziwym API klastra — inaczej
+# wygenerowalibysmy nazwy w cudzej domenie.
+- name: Walidacja — cluster_name/base_domain zgodne z API klastra docelowego
+  ansible.builtin.assert:
+    that:
+      - api_host == 'api.' ~ node_hostname_suffix
+    fail_msg: |
+      cluster_name + base_domain z pliku daja '{{ node_hostname_suffix }}',
+      a API klastra docelowego to '{{ api_host }}'.
+      Popraw cluster_name / base_domain w pliku klastra.
+  vars:
+    api_host: "{{ target_api_url | urlsplit('hostname') }}"
+  when: node_hostname_suffix | length > 0
+
+- name: Wykryj konwencje nazw nodow klastra docelowego
+  ansible.builtin.set_fact:
+    node_hostname_detected: >-
+      {{ 'fqdn' if (node_hostname_suffix | length > 0 and fqdn_count | int == target_node_names | length)
+         else ('short' if dotted_count | int == 0 else 'mixed') }}
+  vars:
+    fqdn_count: "{{ target_node_names | select('search', '[.]' ~ (node_hostname_suffix | regex_escape) ~ '$') | list | length if node_hostname_suffix | length > 0 else 0 }}"
+    dotted_count: "{{ target_node_names | select('search', '[.]') | list | length }}"
+
+- name: Rozstrzygnij styl nazw
+  ansible.builtin.set_fact:
+    node_hostname_mode: "{{ node_hostname_detected if node_hostname_style_req == 'auto' else node_hostname_style_req }}"
+
+- name: Blad — nie da sie ustalic konwencji nazw
+  ansible.builtin.fail:
+    msg: |
+      Nody klastra maja nazwy, ktorych nie umiem dopasowac do konwencji:
+        {{ target_node_names | join(', ') }}
+      {% if node_hostname_suffix | length == 0 %}
+      Brak `base_domain:` w pliku klastra — dopisz go (sufiks: <cluster_name>.<base_domain>).
+      {% else %}
+      Oczekiwany sufiks FQDN: .{{ node_hostname_suffix }}
+      {% endif %}
+      Ustaw styl recznie: -e node_hostname_style=fqdn  albo  -e node_hostname_style=short
+  when: node_hostname_mode == 'mixed'
+
+- name: Walidacja — styl fqdn wymaga base_domain
+  ansible.builtin.assert:
+    that: node_hostname_suffix | length > 0
+    fail_msg: "Styl fqdn wymaga `base_domain:` w pliku klastra."
+  when: node_hostname_mode == 'fqdn'
+
+- name: Inicjalizuj node_hostname_map
+  ansible.builtin.set_fact:
+    node_hostname_map: {}
+
+- name: Zbuduj node_hostname_map
+  ansible.builtin.set_fact:
+    node_hostname_map: >-
+      {{ node_hostname_map | combine({item.name: effective}) }}
+  vars:
+    effective: >-
+      {{ item.hostname if ('.' in item.hostname or node_hostname_mode == 'short')
+         else item.hostname ~ '.' ~ node_hostname_suffix }}
+  loop: "{{ additional_nodes | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Jawnie wpisany FQDN tez musi pasowac do konwencji (np. literowka w domenie
+# albo FQDN w klastrze z krotkimi nazwami).
+- name: Walidacja — hostname zgodny z konwencja klastra
+  ansible.builtin.assert:
+    that:
+      - >-
+        (node_hostname_mode == 'fqdn' and node_hostname_map[item.name].endswith('.' ~ node_hostname_suffix))
+        or (node_hostname_mode == 'short' and '.' not in node_hostname_map[item.name])
+    fail_msg: |
+      '{{ node_hostname_map[item.name] }}' nie pasuje do konwencji klastra ({{ node_hostname_mode }}).
+      Istniejace nody: {{ target_node_names | join(', ') }}
+      W additional_nodes wpisz sam krotki hostname (np. worker-3) — domene doklei playbook.
+  loop: "{{ additional_nodes | default([]) }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ node_hostname_map[item.name] }}"
+
+- name: "=== NAZWY NOWYCH NODOW ==="
+  ansible.builtin.debug:
+    msg: |
+      Konwencja: {{ node_hostname_mode }}{{ ' (wykryta z ' ~ (target_node_names | length) ~ ' nodow)' if node_hostname_style_req == 'auto' else ' (wymuszona)' }}
+      {% for n in additional_nodes | default([]) %}
+        {{ n.name }} -> {{ node_hostname_map[n.name] }}
+      {% endfor %}

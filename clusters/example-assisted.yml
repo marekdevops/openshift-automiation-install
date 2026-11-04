@@ -17,6 +17,7 @@
 # =============================================================================
 
 cluster_name: example-assisted
+base_domain: example.com       # z cluster_name daje domene nodow (worker-3.example-assisted.example.com)
 
 # Kubeconfig klastra, DO KTOREGO dodajemy workera (pobrany z console.redhat.com)
 target_kubeconfig: ~/.kube/clusters/example-assisted
@@ -52,7 +53,7 @@ dns_servers:
 # -----------------------------------------------------------------------------
 additional_nodes:
   - name: example-assisted-worker-3
-    hostname: worker-3
+    hostname: worker-3           # krotko — domene doklei playbook, jesli klaster uzywa FQDN
     role: worker
     mac: ""
     ip: 192.168.214.23

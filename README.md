@@ -167,6 +167,14 @@ checked against the live node list, and only CSRs for the new hostnames are
 approved. For an Assisted Installer cluster, start from `clusters/example-assisted.yml`
 (no `nodes:` section needed).
 
+**Node names.** Put only the short `hostname` in `additional_nodes` (e.g. `worker-3`).
+The playbook detects the naming convention of the live cluster: if its nodes are
+FQDNs (typical for Assisted Installer, names come from DHCP/reverse DNS), it
+appends `.<cluster_name>.<base_domain>` from the cluster file; if they are short
+(clusters from this automation), the name stays short. `cluster_name`/`base_domain`
+are checked against the cluster's API URL, and a hostname that does not match the
+convention stops the run. Override with `-e node_hostname_style=fqdn|short`.
+
 **Mirror registry (disconnected / `oc-mirror`).** `oc adm node-image create`
 copies the cluster's IDMS/ITMS/ICSP mirrors into the ISO, but not the mirror CA
 configured through `image.config.openshift.io/cluster` → `additionalTrustedCA`,
